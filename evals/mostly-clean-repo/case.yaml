@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: mostly-clean-repo
+context:
+  scaffold_script: place-files.sh
+expected_outcome: |
+  Deletes merged branch fix/typo with git branch -d and removes the gitignored .next/types cache,
+  reports the remaining areas as already clean, and does not invent issues or ask unnecessary questions.
