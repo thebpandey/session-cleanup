@@ -11,17 +11,25 @@ Works in any git repo. The lanes harness, beads and Vercel parts switch on only 
 
 ## Phase 1: Audit (read-only)
 
-Run the bundled audit from the repo (any worktree of it):
+Run the bundled audit from the repo (any worktree of it). Use the script for your OS; the skill folder may be under `~/.claude/skills/`, `~/.codex/skills/` or `~/.agents/skills/`:
 
 ```bash
-bash ~/.claude/skills/session-cleanup/scripts/audit.sh            # add --no-fetch offline
+# Linux and macOS
+bash <skill-dir>/scripts/audit.sh                 # add --no-fetch offline
 ```
 
-It prints one section per area (CONTEXT, WORKING_TREE, SYNC, WORKTREES, BRANCHES, STASHES, LANES, PROCESSES, ARTIFACTS, TRACKER, DEPLOY, SESSION_LOG). Its only write is a plain `git fetch` (never `--prune`). It never reads `.env` files or prints process environments.
+```powershell
+# Windows (PowerShell 5.1 or 7)
+powershell -NoProfile -ExecutionPolicy Bypass -File <skill-dir>\scripts\audit.ps1   # add -NoFetch offline
+```
+
+Both print one section per area (CONTEXT, WORKING_TREE, SYNC, WORKTREES, BRANCHES, STASHES, LANES, PROCESSES, ARTIFACTS, TRACKER, DEPLOY, SESSION_LOG). Its only write is a plain `git fetch` (never `--prune`). It never reads `.env` files or prints process environments.
 
 How it decides "this session" (this matters for every classification):
-- **Processes:** `owner=this_session` means the process inherited this session's `CLAUDE_CODE_SESSION_ID`, so this session (or something it launched) started it, even if it was detached with `nohup`. `owner=harness_do_not_kill` is Claude Code's own MCP servers and plugins: never touch these. `other_session_or_user` is someone else's.
+- **Processes:** `owner=this_session` means this session (or something it launched) started the process. On Linux that is proven by the inherited `CLAUDE_CODE_SESSION_ID`, which survives `nohup`. macOS and Windows hide other processes' environments, so there it means "descendant of the Claude process" (`CLAUDE_PID`); a process that was detached and reparented shows as `started_during_session` instead, which is ASK unless you can trace it in this conversation. `owner=harness_do_not_kill` is Claude Code's own MCP servers and plugins: never touch these. `other_session_or_user` is someone else's.
 - **Files, branches, stashes:** `this_session` / `pre_session` compares the timestamp to `session_start` (first timestamp in this session's transcript). Timestamps are a hint, not proof: something created during the session window could come from a parallel session. Treat an item as this session's only when the timestamp says so **and** you can trace it in this conversation (you ran the command that created it). Otherwise it is ASK.
+
+Outside Claude Code (for example in Codex) there is no `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so `session_id` is `unknown`, everything is tagged `pre_session`, and processes are matched only by `in_repo`. Pass `--since <ISO time>` (`-Since` on Windows) with the session start if you know it, and otherwise treat files and processes as ASK unless you can trace them to a command in this conversation.
 
 Then fill the gaps the script cannot see, in parallel where possible:
 1. **Your own background work.** List background Bash tasks, Monitors, subagents and scheduled wakeups you started in this conversation and which are still running. Stop finished or idle ones with the tool that started them (TaskStop, Monitor stop, etc.).
@@ -36,14 +44,14 @@ Then fill the gaps the script cannot see, in parallel where possible:
 - Prunable worktree records whose folder is already gone (`git worktree prune`).
 - Clean linked worktrees inside this repo whose branch is merged into main and has no commits ahead of it (`git worktree remove <path>`, no `--force`; then `git branch -d`). If the lanes harness owns it, use the harness script instead (see below).
 - Temp folders whose lane or branch no longer exists and that no process has open (`open_handles=0`; recheck with `lsof +D <dir>` immediately before deleting).
-- Processes with `owner=this_session` that you can trace to this conversation and that are idle or no longer needed (dev servers, watchers, headless browsers). Kill by PID only.
+- Processes with `owner=this_session` that you can trace to this conversation and that are idle or no longer needed (dev servers, watchers, headless browsers). Kill by PID only (`kill <pid>` on Linux/macOS, `Stop-Process -Id <pid>` on Windows).
 - Stale build type caches (`.next/types`, `.next/dev/types`) that are gitignored. These regenerate on the next build.
 - This session's own scratch files in its scratchpad folder, and untracked junk in the repo (`*.orig`, `*.rej`, stray logs) that is `this_session` **and** traceable to a command you ran.
 
 **ASK** (could lose work, or not provably this session's):
 - Unmerged branches, or any commits not in main. A branch marked `PATCHES_ALREADY_IN_main` was likely squash- or rebase-merged: say so, but still ask before `-D`.
 - Dirty worktrees (`dirty_files > 0`), stashes, `coverage/` and `test-results/` that may be wanted as evidence.
-- Processes `other_session_or_user`, and any process you cannot trace.
+- Processes `other_session_or_user` or `started_during_session`, and any process you cannot trace.
 - Anything `pre_session`, and any untracked file you did not create.
 
 **REPORT ONLY** (the owner acts, or it is informational):
