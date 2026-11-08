@@ -211,7 +211,11 @@ if [ "$IN_GIT" = 1 ] && [ -f "$K/lane/lane-env.sh" ]; then
         note=""; [ -n "$wt" ] && [ ! -d "$wt" ] && note=" WORKTREE_MISSING"
         if [ -n "$wt" ] && [ -d "$wt" ] && [ -n "$MAIN" ]; then
           br=$(git -C "$wt" branch --show-current 2>/dev/null)
-          [ -n "$br" ] && git merge-base --is-ancestor "$br" "$MAIN" 2>/dev/null && note="$note BRANCH_MERGED"
+          # Lanes cleans a lane only once its merge is on origin; a local-only merge is not yet recoverable from the remote.
+          if [ -n "$br" ] && [ -n "${REMOTE:-}" ] && git show-ref --verify --quiet "refs/remotes/$REMOTE/$MAIN" &&
+             git merge-base --is-ancestor "$br" "$REMOTE/$MAIN" 2>/dev/null; then note="$note BRANCH_MERGED"
+          elif [ -n "$br" ] && git merge-base --is-ancestor "$br" "$MAIN" 2>/dev/null; then note="$note MERGED_NOT_ON_${REMOTE:-REMOTE}"
+          fi
         fi
         echo "  row: $lane agent=$agent wt=$wt job=$job$note"
       done < "$S/lanes.tsv"

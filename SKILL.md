@@ -77,7 +77,7 @@ These protect work that cannot be recreated. Each one exists because the obvious
 
 Only if the LANES section shows a state dir. Otherwise skip this block.
 - Remove lane worktrees, lane temp dirs, relay job dirs and `lanes.tsv` rows with the harness's own script, never with `rm`: `bash ~/.claude/skills/lanes/lane/cleanup.sh <lane-dir> <branch>` for a merged lane, then `bash ~/.claude/skills/lanes/lane/cleanup.sh --sweep`. Run it from the main worktree.
-- `WORKTREE_MISSING` and `BRANCH_MERGED` rows go through the sweep. Rows for unmerged lanes are ASK.
+- `WORKTREE_MISSING` and `BRANCH_MERGED` (merged into origin's main) rows go through the sweep. `MERGED_NOT_ON_origin` rows are merged locally but unpushed: REPORT ONLY, recommend `lane-finish.sh --push`. Rows for unmerged lanes are ASK.
 - Relay jobs still running (no `rc` file) are REPORT ONLY; the lanes watchdog owns them.
 - In a `/lanes` session the main lane integrates; do not delete a lane branch whose work is not yet merged to origin/main.
 
