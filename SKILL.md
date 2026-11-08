@@ -79,7 +79,7 @@ The plan is a JSON array; copy each fingerprint from the audit output, never fro
  {"type": "stash", "sha": "<sha=>", "message": "<text after ::>"}]
 ```
 
-`force` (`-D`) goes only on a branch the owner approved. The executor re-checks every target and skips anything that changed since the audit; quote its `skipped:` and `restore:` lines verbatim in the report. Completed actions are logged with their restore command in `~/.local/state/session-cleanup/ledger.jsonl`. Windows has no executor yet: there, show each command and its restore line before running it.
+`force` (deletes an unmerged branch) goes only on a branch the owner approved. The executor re-checks every target and skips anything that changed since the audit; quote its `skipped:` and `restore:` lines verbatim in the report. Completed actions are logged with their restore command in `~/.local/state/session-cleanup/ledger.jsonl`. Windows has no executor yet: there, show each command and its restore line before running it.
 
 ## Safety rules
 

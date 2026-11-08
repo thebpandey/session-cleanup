@@ -37,6 +37,7 @@ else
   cwds() { for c in /proc/[0-9]*/cwd; do readlink "$c" 2>/dev/null; done; }
 fi
 pstart() { local s; s=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null) && [ -n "$s" ] && lstart2epoch "$s"; }
+q() { printf '%q' "$1"; }  # shell-quote one restore-command argument
 under() { awk -v r="$1" '$0==r || index($0, r "/")==1 {f=1} END{exit !f}'; } # stdin has a path at or under $1
 
 COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
@@ -44,6 +45,12 @@ MAIN_WT=$(dirname "$COMMON")
 # Ignored output that regenerates on the next build; same set as lanes worktree-tools.py cleanup().
 REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo|coverage)(/|$)|\.(pyc|tsbuildinfo)$'
 SECRET_FIND='-name .env* -o -name *.pem -o -name *.key -o -name id_rsa* -o -name id_ed25519* -o -name id_ecdsa* -o -name *.p12 -o -name *.pfx -o -name *credential* -o -name *secret*'
+# has_secret <dir>: any env, key or credential file anywhere inside, including ignored build output
+# (Next.js standalone copies .env). Templates such as .env.example are allowed.
+has_secret() {
+  # shellcheck disable=SC2086 # SECRET_FIND is a list of find predicates; set -f stops glob expansion
+  [ -n "$(set -f; find "$1" \( $SECRET_FIND \) ! -name '*.example' ! -name '*.sample' ! -name '*.template' -print 2>/dev/null | head -1)" ]
+}
 
 # Paths may be deleted only strictly inside: this repo, this session's scratchpad, the user's own TMPDIR.
 ROOTS="$MAIN_WT"
@@ -91,13 +98,14 @@ act() { # act <target> <restore> cmd...
 }
 
 do_branch() {
-  local name="$a" tip="$b" force="$c" t="branch $a" cur flag=-d
+  local name="$a" tip="$b" force="$c" t="branch $a" cur
   git check-ref-format "refs/heads/$name" || { refuse "$t" "invalid branch name"; return; }
   cur=$(git rev-parse --verify -q "refs/heads/$name") || { skip "$t" "branch is gone"; return; }
   [ "$cur" = "$tip" ] || { skip "$t" "tip $tip is now $cur"; return; }
   if git worktree list --porcelain | grep -qxF "branch refs/heads/$name"; then refuse "$t" "checked out in a worktree"; return; fi
-  [ "$force" = 1 ] && flag=-D
-  act "$t" "git branch $name $tip" git branch "$flag" "$name"
+  # Forced delete is a compare-and-delete on the recorded tip, so a move after the check cannot be lost.
+  if [ "$force" = 1 ]; then act "$t" "git branch $(q "$name") $tip" git update-ref -d "refs/heads/$name" "$tip"
+  else act "$t" "git branch $(q "$name") $tip" git branch -d "$name"; fi
 }
 
 do_worktree() {
@@ -118,12 +126,13 @@ do_worktree() {
   [ "$n" = 0 ] || { refuse "$t" "dirty: $n changed or untracked files"; return; }
   n=$(git -C "$res" status --porcelain --ignored=matching --untracked-files=all | sed -n 's/^!! //p' | sed 's#/$##' | grep -Ecv "$REGEN")
   [ "$n" = 0 ] || { refuse "$t" "$n ignored files that do not regenerate"; return; }
+  if has_secret "$res"; then refuse "$t" "contains an env, key or credential file"; return; fi
   if cwds | under "$res"; then refuse "$t" "a process has its cwd inside"; return; fi
-  act "$t" "git worktree add $res ${br:-$head}" git worktree remove "$res"
+  act "$t" "git worktree add $(q "$res") $(q "${br:-$head}")" git worktree remove "$res"
 }
 
 do_path() {
-  local p="$a" kind="$b" size="$c" mt="$d" t="path $a" base res
+  local p="$a" kind="$b" size="$c" mt="$d" t="path $a" base res n
   case "$p" in /*) ;; *) refuse "$t" "not an absolute path"; return ;; esac
   [ -L "$p" ] && { refuse "$t" "symlink"; return; }
   [ -e "$p" ] || { skip "$t" "path is gone"; return; }
@@ -139,15 +148,19 @@ do_path() {
       [ -z "$(git -C "$(dirname "$res")" ls-files -- "$base" 2>/dev/null)" ] || { refuse "$t" "tracked by git"; return; }
       [ "$size" = - ] || [ "$(fsize "$res")" = "$size" ] || { skip "$t" "size $size is now $(fsize "$res")"; return; } ;;
     dir) [ -d "$res" ] || { skip "$t" "no longer a directory"; return; }
-      # shellcheck disable=SC2086 # SECRET_FIND is a list of find predicates, globs quoted by set -f
-      [ -z "$(set -f; find "$res" \( $SECRET_FIND \) -print 2>/dev/null | head -1)" ] || { refuse "$t" "contains an env, key or credential file"; return; }
+      if has_secret "$res"; then refuse "$t" "contains an env, key or credential file"; return; fi
       [ -z "$(find "$res" -name .git -print 2>/dev/null | head -1)" ] || { refuse "$t" "contains a git checkout"; return; }
       [ -z "$(git -C "$res" ls-files 2>/dev/null | head -1)" ] || { refuse "$t" "contains tracked files"; return; }
       [ "$size" = - ] || [ "$(dsize "$res")" = "$size" ] || { skip "$t" "size $size is now $(dsize "$res")"; return; } ;;
     *) refuse "$t" "kind must be file or dir"; return ;;
   esac
   [ "$mt" = - ] || [ "$(mtime "$res")" = "$mt" ] || { skip "$t" "mtime $mt is now $(mtime "$res")"; return; }
-  if [ "$kind" = file ]; then act "$t" none rm -f -- "$res"; else act "$t" none rm -rf -- "$res"; fi
+  if [ "$kind" = dir ]; then # mtime does not change when a process opens an existing file, so ask lsof
+    command -v lsof >/dev/null 2>&1 || { refuse "$t" "cannot check open files: lsof missing"; return; }
+    n=$(lsof +D "$res" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+    [ "$n" = 0 ] || { refuse "$t" "$n open files inside"; return; }
+    act "$t" none rm -rf -- "$res"
+  else act "$t" none rm -f -- "$res"; fi
 }
 
 do_process() {
@@ -171,7 +184,7 @@ do_stash() {
   [ -n "$row" ] || { skip "$t" "no stash with this sha"; return; }
   ref="${row%%$'\t'*}"
   [ "${row#*$'\t'}" = "$msg" ] || { skip "$t" "message is now: ${row#*$'\t'}"; return; }
-  act "$t" "git stash store -m \"$msg\" $sha" git stash drop -q "$ref"
+  act "$t" "git stash store -m $(q "$msg") $sha" git stash drop -q "$ref"
 }
 
 # One tab-separated line per item: type, four fields ("-" when empty, since read collapses tabs), item JSON.

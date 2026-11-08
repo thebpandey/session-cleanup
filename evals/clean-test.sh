@@ -13,17 +13,29 @@ has() { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
 
 cd "$D" && git init -q -b main repo && cd repo || exit 1
 git config user.email t@example.com; git config user.name tester; git config commit.gpgsign false
-echo a > a; git add a; git commit -qm init
+echo a > a; echo .next/ > .gitignore; git add a .gitignore; git commit -qm init
 git branch merged; git branch moved
 MERGED_TIP=$(git rev-parse merged); MOVED_TIP=$(git rev-parse moved)
+git checkout -q -b unmerged; echo u > u; git add u; git commit -qm unmerged; git checkout -q main
+UNMERGED_TIP=$(git rev-parse unmerged)
+# Next.js standalone output copies .env into ignored build output: removing the worktree would delete it.
+git worktree add -q "$D/repo/.claude/worktrees/next" -b wt/next; NEXT_HEAD=$(git -C .claude/worktrees/next rev-parse HEAD)
+mkdir -p .claude/worktrees/next/.next/standalone; echo FAKE=1 > .claude/worktrees/next/.next/standalone/.env
+SPACED="$D/repo/.claude/worktrees/w 2"
+git worktree add -q "$SPACED" -b wt/w2; W2_HEAD=$(git -C "$SPACED" rev-parse HEAD)
 git worktree add -q "$D/repo/.claude/worktrees/w" -b wt/w; WT_HEAD=$(git -C .claude/worktrees/w rev-parse HEAD)
 echo unsaved > .claude/worktrees/w/notes.md
 echo junk > junk.log; ln -s "$D/repo/a" link; echo FAKE=1 > .env
 JUNK_SIZE=$(wc -c < junk.log | tr -d ' ')
+echo before > changed.log; CHANGED_SIZE=$(wc -c < changed.log | tr -d ' ')
 cat > "$D/plan.json" <<EOF
 [
   {"type": "branch", "name": "merged", "tip": "$MERGED_TIP"},
   {"type": "branch", "name": "moved", "tip": "$MOVED_TIP"},
+  {"type": "branch", "name": "unmerged", "tip": "$UNMERGED_TIP", "force": true},
+  {"type": "worktree", "path": "$D/repo/.claude/worktrees/next", "head": "$NEXT_HEAD"},
+  {"type": "worktree", "path": "$SPACED", "head": "$W2_HEAD"},
+  {"type": "path", "path": "$D/repo/changed.log", "kind": "file", "size_bytes": $CHANGED_SIZE},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/w", "head": "$WT_HEAD"},
   {"type": "path", "path": "$D/repo/junk.log", "kind": "file", "size_bytes": $JUNK_SIZE},
   {"type": "path", "path": "$D/repo/link", "kind": "file", "size_bytes": 2},
@@ -32,6 +44,7 @@ cat > "$D/plan.json" <<EOF
 EOF
 # The branch moves after the plan was written: its recorded tip no longer matches.
 git checkout -q moved; echo c > c; git add c; git commit -qm "new work"; git checkout -q main
+echo "edited after the plan" >> changed.log
 
 OUT=$(bash "$SK/scripts/clean.sh" "$D/plan.json" --dry-run 2>&1); rc=$?
 [ "$rc" = 0 ] && git show-ref -q refs/heads/merged && [ -f junk.log ] && [ ! -e "$LEDGER" ] && has "would: branch merged"
@@ -50,8 +63,17 @@ expect "dirty worktree is refused" $?
 expect "symlinked path is refused" $?
 [ -f .env ] && has "skipped: path $D/repo/.env: refused (env, key or credential file)"
 expect ".env path is refused" $?
-[ ! -e junk.log ] && [ "$(grep -c . "$LEDGER")" = 2 ]
-expect "matching file deleted; ledger has exactly the two completed actions" $?
+[ -f changed.log ] && has "skipped: path $D/repo/changed.log: changed since audit (size $CHANGED_SIZE is now"
+expect "file changed after the plan survives" $?
+[ -f .claude/worktrees/next/.next/standalone/.env ] && has "worktrees/next: refused (contains an env, key or credential file)"
+expect "worktree with .env in ignored build output is refused" $?
+! git show-ref -q refs/heads/unmerged && has "restore: git branch unmerged $UNMERGED_TIP"
+expect "forced branch with matching tip deleted" $?
+[ ! -e junk.log ] && [ "$(grep -c . "$LEDGER")" = 4 ]
+expect "matching file deleted; ledger has exactly the four completed actions" $?
+RESTORE=$(printf '%s\n' "$OUT" | grep -F "restore: git worktree add" | sed 's/^restore: //')
+[ ! -e "$SPACED" ] && [ -n "$RESTORE" ] && eval "$RESTORE" >/dev/null 2>&1 && [ -f "$SPACED/a" ]
+expect "restore line for a worktree path with a space round-trips through eval" $?
 
 cd / && rm -rf "$D"
 echo "clean_test_failures=$FAILS"
