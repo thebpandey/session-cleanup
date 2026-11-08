@@ -135,9 +135,9 @@ do_worktree() {
   [ "$found" = 1 ] || { refuse "$t" "not a linked worktree of this repo"; return; }
   cur=$(git -C "$res" rev-parse HEAD 2>/dev/null)
   [ "$cur" = "$head" ] || { skip "$t" "HEAD $head is now $cur"; return; }
-  n=$(git -C "$res" status --porcelain --untracked-files=all | wc -l | tr -d ' ')
+  n=$(GIT_OPTIONAL_LOCKS=0 git -C "$res" status --porcelain --untracked-files=all | wc -l | tr -d ' ')
   [ "$n" = 0 ] || { refuse "$t" "dirty: $n changed or untracked files"; return; }
-  n=$(git -C "$res" status --porcelain --ignored=matching --untracked-files=all | sed -n 's/^!! //p' | sed 's#/$##' | grep -Ecv "$REGEN")
+  n=$(GIT_OPTIONAL_LOCKS=0 git -C "$res" status --porcelain --ignored=matching --untracked-files=all | sed -n 's/^!! //p' | sed 's#/$##' | grep -Ecv "$REGEN")
   [ "$n" = 0 ] || { refuse "$t" "$n ignored files that do not regenerate"; return; }
   if has_secret "$res"; then refuse "$t" "contains an env, key or credential file"; return; fi
   if [ "$OS" = Darwin ] && ! command -v lsof >/dev/null 2>&1; then refuse "$t" "cannot check process cwds: lsof missing"; return; fi
