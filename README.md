@@ -75,9 +75,9 @@ bash ~/.agents/skills/session-cleanup/scripts/clean.sh plan.json
 ```
 
 - **Re-verification.** Right before acting, each item is checked against its fingerprint (branch tip, worktree HEAD and cleanliness, path size and mtime, process start time and command, stash SHA). Anything that moved is skipped as `changed since audit`; anything unsafe is skipped as `refused (...)`.
-- **Hard limits.** No `--force`, no `kill -9`, no globs. Forced branch deletion is `git update-ref -d` with the recorded tip. It refuses symlinks in any path component, `.env`, key and credential files anywhere (even inside build output such as `.next/standalone`), open files (`lsof`), and `coverage/`.
+- **Hard limits.** No `--force`, no `kill -9`, no globs. Forced branch deletion is `git update-ref -d` with the recorded tip. It refuses symlinks in any path component, and `.env`, key and credential files anywhere (even inside build output such as `.next/standalone`). Directory path items with open files (`lsof`) are refused; single-file path items get no open-file check. A worktree is refused if it holds ignored files that do not regenerate (`coverage/` counts as one) or a process has its cwd inside; a standalone `coverage/` path item is not specially blocked.
 - **Ledger and restore.** Each completed action appends one JSON line to `${XDG_STATE_HOME:-~/.local/state}/session-cleanup/ledger.jsonl`, with a shell-quoted restore command for branches, stashes and worktrees. A worktree restore recreates its branch from the recorded HEAD if needed.
-- **Recoverable means on the remote.** The audit tags branches and worktrees with `on_<remote>=yes|no` (an ancestor of the remote's main, or no missing patches and no merge commits), and worktrees with `user_ignored_files=N` (ignored files that do not regenerate).
+- **Recoverable means on the remote.** The audit tags branch and linked-worktree lines with `on_<remote>=yes|no` (an ancestor of the remote's main, or no missing patches and no merge commits). Only linked-worktree lines carry `user_ignored_files=N` (ignored files that do not regenerate).
 
 ## How it knows what "this session" created
 
@@ -190,7 +190,7 @@ listening_ports (only for the processes above):
   pid=164662 listen=127.0.0.1:3000
 ```
 
-Branch and worktree lines also carry `on_origin=yes|no`, and worktree lines `user_ignored_files=N`.
+Branch and linked-worktree lines also carry `on_origin=yes|no`; only linked-worktree lines carry `user_ignored_files=N`.
 
 Outside a Claude Code session the session ID is unknown, so ownership tags fall back to `in_repo` only and timestamps are tagged `pre_session`.
 
