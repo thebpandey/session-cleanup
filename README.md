@@ -2,6 +2,8 @@
 
 A Claude Code and Codex skill that audits a git repository and the machine at the end of a work session, removes leftovers that are provably stale and recoverable, and asks before touching anything that could lose work. Licensed under [MIT](LICENSE).
 
+**Current release: 1.0.1** · [Changelog](CHANGELOG.md)
+
 Long agent sessions leave debris: merged branches, worktrees whose folders were deleted, dev servers still listening on a port, stashes nobody remembers, build caches, temp folders, commits that never got pushed. Cleaning that up by hand is tedious, and letting an agent do it carelessly is dangerous. This skill makes the agent **audit first, inspect every target, delete only what passes explicit safety rules, and hand everything else back to you with the facts needed to decide.**
 
 ## What it does
@@ -47,6 +49,8 @@ When triggered, the agent:
 - Drift between main and origin (the skill recommends a push, it never pushes).
 - Deploy mismatches, or deploy state it could not verify.
 - Open tracker items, and worktrees or folders outside the repo.
+
+**Lanes rows.** A `lanes.tsv` row tagged `BRANCH_MERGED` is merged into the remote's main and goes through the lanes sweep. A row tagged `MERGED_NOT_ON_<remote>` (for example `MERGED_NOT_ON_origin`) is merged only into local main: REPORT ONLY, push it with `lane-finish.sh --push` first.
 
 ### Safety rules
 
