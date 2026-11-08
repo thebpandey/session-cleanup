@@ -2,7 +2,7 @@
 
 A Claude Code and Codex skill that audits a git repository and the machine at the end of a work session, removes leftovers that are provably stale and recoverable, and asks before touching anything that could lose work. Licensed under [MIT](LICENSE).
 
-**Current release: 1.1.0** · [Changelog](CHANGELOG.md)
+**Current release: 1.2.0** · [Changelog](CHANGELOG.md)
 
 Long agent sessions leave debris: merged branches, worktrees whose folders were deleted, dev servers still listening on a port, stashes nobody remembers, build caches, temp folders, commits that never got pushed. Cleaning that up by hand is tedious, and letting an agent do it carelessly is dangerous. This skill makes the agent **audit first, inspect every target, delete only what passes explicit safety rules, and hand everything else back to you with the facts needed to decide.**
 
@@ -89,6 +89,12 @@ Ownership decides whether something is `AUTO-CLEAN` or `ASK`, so the skill uses 
   - Claude Code's own MCP servers and plugins also match, so they are tagged `owner=harness_do_not_kill`. Everything else is `other_session_or_user`.
 - **Files, branches and stashes.** Timestamps are compared to the session start, taken from the first timestamp in the session transcript (`~/.claude/projects/*/<session-id>.jsonl`), falling back to the Claude process start time. Items are tagged `this_session` or `pre_session`.
 - **Timestamps are a hint, not proof.** A parallel session could create files in the same window. The skill treats an item as this session's only when the timestamp agrees **and** the agent can trace its creation to a command in the current conversation. Anything else goes to `ASK`.
+
+## Machine scope and the daily sweep
+
+`audit.sh --machine` adds a size-ranked report of what the machine is holding: Claude scratchpads (with session liveness), orphaned dev servers, big untracked files and worktrees. Lane artifacts are listed but left to the lanes sweep.
+
+`scripts/machine-sweep.sh` runs unattended and deletes only scratchpads of dead sessions (idle 7 days, no readable process carrying the session id), through `clean.sh`. Everything else goes to `~/.local/state/session-cleanup/last-machine-sweep.txt` for the next session to show. Try it with `--dry-run`. `scripts/install-timer.sh` installs a daily systemd user timer (`--remove` uninstalls); on macOS it prints a scheduling hint. See SKILL.md and the scripts for the exact rules.
 
 ## Install
 
