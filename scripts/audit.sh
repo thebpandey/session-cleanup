@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # audit.sh [--no-fetch] [--repo <path>] [--since <ISO-8601>] [--big-mb <N>]
+# audit.sh --machine [--roots <dir>[:<dir>]] [--big-mb <N>]   machine-wide MACHINE section only
+# audit.sh --session-live <id>...                             prints "<id> yes|no|unknown" per id
 #
 # Read-only end-of-session audit for Linux and macOS (Windows: use audit.ps1).
 # Prints one section per area as "key: value" lines.
@@ -9,14 +11,17 @@
 # Compatible with bash 3.2 (macOS default) and GNU or BSD userland.
 set -uo pipefail
 
-FETCH=1 REPO="" SINCE="" BIG_MB=50
+FETCH=1 REPO="" SINCE="" BIG_MB=50 MACHINE=0 ROOTS_ARG="$HOME/dev" LIVE_IDS_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-fetch) FETCH=0 ;;
     --repo) REPO="$2"; shift ;;
     --since) SINCE="$2"; shift ;;
     --big-mb) BIG_MB="$2"; shift ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    --machine) MACHINE=1 ;;
+    --roots) ROOTS_ARG="$2"; shift ;;
+    --session-live) shift; LIVE_IDS_ARG="$*"; [ -n "$LIVE_IDS_ARG" ] || { echo "usage: --session-live <id>..." >&2; exit 2; }; break ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -82,6 +87,185 @@ run_to() { # run_to <secs> cmd... ; uses timeout/gtimeout when available
 recent() { [ "$SINCE_EPOCH" -gt 0 ] && [ "${1:-0}" -ge "$SINCE_EPOCH" ]; }
 mine=$(id -u)
 TMPROOTS="/tmp"; [ -n "${TMPDIR:-}" ] && [ "${TMPDIR%/}" != /tmp ] && TMPROOTS="$TMPROOTS ${TMPDIR%/}"
+
+# ---------- machine scope (--machine, --session-live) ----------
+# SC_TMP_ROOT replaces /tmp; it exists for evals/machine-test.sh only.
+TMP_BASE="${SC_TMP_ROOT:-/tmp}"
+claude_bases() { # roots holding Claude Code scratch folders: <base>/<project>/<session-id>/
+  echo "$TMP_BASE/claude-$mine"
+  [ -z "${SC_TMP_ROOT:-}" ] && [ -n "${TMPDIR:-}" ] && [ "${TMPDIR%/}" != /tmp ] && echo "${TMPDIR%/}/claude-$mine"
+  return 0
+}
+is_uuid() { printf '%s\n' "$1" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'; }
+if [ "$OS" = Darwin ]; then newest() { find "$1" -exec stat -f %m {} + 2>/dev/null | sort -n | tail -1; }
+else newest() { find "$1" -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -1; }; fi
+
+# scan_envs sets LIVE_IDS (session ids found in this user's process environments) and CANDS (start epochs of
+# this user's processes whose environment is unreadable and whose session cannot be told from their ancestry).
+# Only CLAUDE_CODE_SESSION_ID is extracted; no environment is printed. An unreadable process takes the session
+# of its nearest readable ancestor (environments are inherited) and none when the chain crosses another user's
+# process (sudo and daemons reset the environment). A chain that reaches pid 1 or the user's systemd, where
+# orphans are reparented, is a candidate: it may hold any session started before it.
+scan_envs() {
+  LIVE_IDS="" CANDS="" ENV_PROBE=none
+  [ "$OS" = Linux ] || return 0
+  ENV_PROBE=proc
+  local res p s
+  res=$(ps -axo pid=,ppid=,ruid=,comm= 2>/dev/null | while read -r p pp u c; do
+      st=o id=-
+      if [ "$u" = "$mine" ]; then
+        if id=$({ tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^CLAUDE_CODE_SESSION_ID=//p'; } 2>/dev/null); then
+          st=r; id=${id%%$'\n'*}; [ -n "$id" ] || id=-
+        elif [ -d "/proc/$p" ]; then st=u id=-
+        else continue; fi
+      fi
+      printf '%s %s %s %s %s\n' "$p" "$pp" "$st" "$id" "$c"
+    done | awk '{pp[$1]=$2; st[$1]=$3; id[$1]=$4; c[$1]=$5}
+    END{
+      for (p in st) {
+        if (st[p]=="r" && id[p]!="-") print "live", id[p]
+        if (st[p]!="u") continue
+        q=pp[p]; res="cand"
+        for (n=0; n<64; n++) {
+          if (q==1 || !(q in st)) break
+          if (st[q]!="o" && c[q]=="systemd" && pp[q]==1) break
+          if (st[q]=="o") { res="none"; break }
+          if (st[q]=="r") { res=(id[q]=="-") ? "none" : "live " id[q]; break }
+          q=pp[q]
+        }
+        if (res=="cand") print "cand", p; else if (res!="none") print res
+      }
+    }')
+  LIVE_IDS=$(printf '%s\n' "$res" | awk '$1=="live"{print $2}' | sort -u)
+  for p in $(printf '%s\n' "$res" | awk '$1=="cand"{print $2}'); do
+    s=$(pstart "$p") && CANDS="$CANDS $s"
+  done
+  return 0
+}
+tx_of() { local f; for f in "$HOME"/.claude/projects/*/"$1".jsonl; do [ -f "$f" ] && { echo "$f"; return 0; }; done; return 1; }
+# session_live <id>: yes when a process carries the id or its transcript changed in the last 24h; unknown when an
+# unreadable environment could hold it (or on macOS, which hides environments); otherwise no.
+session_live() {
+  local id="$1" tx t1 s
+  printf '%s\n' "$LIVE_IDS" | grep -qxF -- "$id" && { echo yes; return; }
+  tx=$(tx_of "$id")
+  [ -n "$tx" ] && [ $(( $(date +%s) - $(mtime "$tx") )) -lt 86400 ] && { echo yes; return; }
+  [ "$ENV_PROBE" = proc ] || { echo unknown; return; }
+  [ -z "$CANDS" ] && { echo no; return; }
+  [ -n "$tx" ] || { echo unknown; return; }
+  # A candidate started before the session began cannot carry its id. The first transcript entry can come well
+  # after launch (idle at the prompt), so allow a day of slack.
+  t1=$(iso2epoch "$(grep -o '"timestamp":"[^"]*"' "$tx" | head -1 | cut -d'"' -f4)")
+  [ "${t1:-0}" -gt 0 ] || { echo unknown; return; }
+  for s in $CANDS; do [ "$s" -ge $(( t1 - 86400 )) ] && { echo unknown; return; }; done
+  echo no
+}
+
+if [ -n "$LIVE_IDS_ARG" ]; then
+  scan_envs
+  for i in $LIVE_IDS_ARG; do echo "$i $(session_live "$i")"; done
+  exit 0
+fi
+
+if [ "$MACHINE" = 1 ]; then
+  hdr MACHINE
+  echo "roots: $ROOTS_ARG"
+  scan_envs
+  if [ "$ENV_PROBE" = proc ]; then echo "liveness: process environments and transcripts ($(echo $CANDS | wc -w | tr -d ' ') unreadable orphan environments)"
+  else echo "liveness: transcripts only (this OS hides process environments, so not live means unknown)"; fi
+  IT=$(mktemp "${TMPDIR:-/tmp}/.sc-machine.XXXXXX") || exit 1
+  trap 'rm -f "$IT"' EXIT
+  kb() { du -sk "$1" 2>/dev/null | cut -f1; }
+  # Item lines: <kb> TAB <class> TAB <text>. class: safe (machine-sweep.sh deletes it), ask, in_use, report.
+  claude_bases | while IFS= read -r base; do
+    [ -d "$base" ] && [ ! -L "$base" ] || continue
+    for proj in "$base"/*/; do
+      proj=${proj%/}; [ -L "$proj" ] && continue
+      for e in "$proj"/* "$proj"/.[!.]*; do
+        [ -e "$e" ] || [ -L "$e" ] || continue
+        n=$(basename "$e")
+        if is_uuid "$n" && [ -d "$e" ] && [ ! -L "$e" ]; then
+          nm=$(newest "$e"); live=$(session_live "$n"); class=ask
+          [ "$live" = yes ] && class=in_use
+          [ "$live" = no ] && [ $(( now - ${nm:-$now} )) -gt 604800 ] && class=safe
+          printf '%s\t%s\t%s\n' "$(kb "$e")" "$class" "scratchpad: $e session_id=$n newest_mtime=$nm age=$(age "$nm") session_live=$live"
+        else
+          printf '%s\t%s\t%s\n' "$(kb "$e")" ask "claude_tmp_other: $e age=$(age "$(mtime "$e")")"
+        fi
+      done
+    done
+  done >> "$IT"
+
+  # Orphaned dev servers: this user's TCP listeners whose parent is init or the user's systemd and whose cwd is in a root.
+  in_mroot() { local r IFS=:; for r in $ROOTS_ARG; do case "$1" in "$r"|"$r"/*) return 0 ;; esac; done; return 1; }
+  SYSD=$(ps -axo pid=,ppid=,uid=,comm= 2>/dev/null | awk -v u="$mine" '$2==1 && $3==u && $4=="systemd"{print $1}')
+  if [ "$OS" = Darwin ]; then
+    listeners=$(lsof -nP -a -u "$mine" -iTCP -sTCP:LISTEN -Fpn 2>/dev/null | awk '/^p/{p=substr($0,2)} /^n/{print p, substr($0,2)}')
+    lcwd() { lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; }
+  else
+    listeners=$(ss -ltnpH 2>/dev/null | awk '{a=$4; while (match($0, /pid=[0-9]+/)) {print substr($0, RSTART+4, RLENGTH-4), a; $0=substr($0, RSTART+RLENGTH)}}')
+    lcwd() { readlink "/proc/$1/cwd" 2>/dev/null; }
+  fi
+  DEVS=$(printf '%s\n' "$listeners" | sort -u | while read -r pid addr; do
+    [ -n "$pid" ] || continue
+    [ "$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$mine" ] || continue
+    pp=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ "$pp" = 1 ] || { [ -n "$SYSD" ] && printf '%s\n' "$SYSD" | grep -qx "$pp"; } || continue
+    cwd=$(lcwd "$pid"); in_mroot "$cwd" || continue
+    et=$(ps -o etime= -p "$pid" | tr -d ' ')
+    echo "  pid=$pid listen=$addr age=$(age $(( now - $(etime2s "$et") ))) cwd=$cwd cmd=$(ps -o command= -p "$pid" | cut -c1-140)"
+  done)
+
+  # Repos under the roots. Lanes owns lane worktrees and temp dirs in repos with lanes state, so they are not classified.
+  REPOS=$(IFS=:; for r in $ROOTS_ARG; do
+      [ -d "$r" ] && find "$r" -maxdepth 4 \( -name node_modules -o -name .cache \) -prune -o -name .git -type d -print -prune 2>/dev/null
+    done | while IFS= read -r g; do (cd "$(dirname "$g")" && pwd -P); done | sort -u)
+  REPOLINES=""
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    nwt=$(( $(git -C "$r" worktree list --porcelain 2>/dev/null | grep -c '^worktree ') - 1 ))
+    nst=$(git -C "$r" stash list 2>/dev/null | cnt)
+    line="  repo: $r linked_worktrees=$nwt stashes=$nst"
+    if [ -d "$HOME/.local/state/lanes/$(basename "$r")-$(sha8 "$r")" ]; then
+      line="$line lanes: run cleanup.sh --sweep --dry-run"
+    else
+      git -C "$r" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0,10)}' | tail -n +2 | while IFS= read -r w; do
+        [ -d "$w" ] || continue
+        printf '%s\t%s\t%s\n' "$(kb "$w")" ask "worktree: $w repo=$r inside_roots=$(in_mroot "$w" && echo yes || echo no) dirty_files=$(git -C "$w" status --porcelain 2>/dev/null | cnt)"
+      done >> "$IT"
+    fi
+    find "$r" \( -name node_modules -o -name .git -o -name .next -o -name .beads -o -path "$r/.claude/worktrees" \) -prune -o -type f -size +"${BIG_MB}"M -print 2>/dev/null | head -30 |
+      while IFS= read -r f; do
+        git -C "$r" ls-files --error-unmatch "$f" >/dev/null 2>&1 && continue
+        printf '%s\t%s\t%s\n' "$(kb "$f")" ask "big_untracked_file: $f repo=$r age=$(age "$(mtime "$f")")"
+      done >> "$IT"
+    REPOLINES="$REPOLINES$line
+"
+  done <<EOF
+$REPOS
+EOF
+
+  # Loose files at the root of the lanes temp folder: report only.
+  L="$TMP_BASE/lanes-$mine"
+  [ -d "$L" ] && find "$L" -mindepth 1 -maxdepth 1 ! -type d 2>/dev/null | while IFS= read -r f; do
+    printf '%s\t%s\t%s\n' "$(kb "$f")" report "lanes_tmp_loose: $f age=$(age "$(mtime "$f")")"; done >> "$IT"
+
+  human() { awk '{k=$1; if (k>=1048576) printf "%.1fG", k/1048576; else if (k>=1024) printf "%.1fM", k/1024; else printf "%dK", k}'; }
+  tot() { awk -F'\t' -v c="$1" '$2==c{s+=$1; n++} END{print s+0, n+0}' "$IT"; }
+  set -- $(tot safe); echo "reclaimable_safe: $(echo "$1" | human) in $2 items (machine-sweep.sh deletes these)"
+  set -- $(tot ask); echo "reclaimable_needs_your_call: $(echo "$1" | human) in $2 items"
+  echo "items (largest first; safe | ask | in_use | report):"
+  awk -F'\t' 'NF>=3' "$IT" | sort -t "$(printf '\t')" -k1,1nr | while IFS=$'\t' read -r k cl text; do
+    echo "  $(echo "$k" | human) $cl $text"
+  done
+  echo "dev_servers_orphaned (report only):"
+  if [ -n "$DEVS" ]; then printf '%s\n' "$DEVS"; else echo "  none"; fi
+  echo "repos:"
+  if [ -n "$REPOLINES" ]; then printf '%s' "$REPOLINES"; else echo "  none"; fi
+  echo
+  echo "audit: done (read-only)"
+  exit 0
+fi
 
 # ---------- context ----------
 hdr CONTEXT
@@ -223,7 +407,7 @@ if [ "$IN_GIT" = 1 ] && [ -f "$K/lane/lane-env.sh" ]; then
   S="$HOME/.local/state/lanes/$(basename "$MAIN_WT")-$(sha8 "$MAIN_WT")"
   if [ -d "$S" ]; then
     echo "state_dir: $S"
-    echo "cleanup_script: bash $K/lane/cleanup.sh <lane-dir> <branch> | --sweep (use this, not rm)"
+    echo "cleanup_script: bash $K/lane/cleanup.sh --sweep --dry-run, then --sweep (lanes owns lane artifacts; never rm)"
     if [ -s "$S/lanes.tsv" ]; then
       while IFS=$'\t' read -r lane agent task wt job; do
         [ -z "$lane" ] && continue
