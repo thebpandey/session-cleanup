@@ -2,7 +2,7 @@
 
 A Claude Code and Codex skill that audits a git repository and the machine at the end of a work session, removes leftovers that are provably stale and recoverable, and asks before touching anything that could lose work. Licensed under [MIT](LICENSE).
 
-**Current release: 1.0.1** · [Changelog](CHANGELOG.md)
+**Current release: 1.1.0** · [Changelog](CHANGELOG.md)
 
 Long agent sessions leave debris: merged branches, worktrees whose folders were deleted, dev servers still listening on a port, stashes nobody remembers, build caches, temp folders, commits that never got pushed. Cleaning that up by hand is tedious, and letting an agent do it carelessly is dangerous. This skill makes the agent **audit first, inspect every target, delete only what passes explicit safety rules, and hand everything else back to you with the facts needed to decide.**
 
@@ -64,6 +64,20 @@ These are non-negotiable in the skill:
 - Never touch worktrees or folders outside the repo; report them.
 - Never kill Claude Code's own MCP servers, plugins or the Claude process.
 - With the lanes harness, remove lane worktrees through its `cleanup.sh`, never with `rm`.
+
+## How cleanup is executed
+
+The agent never deletes by hand. It writes an approved plan (a JSON array of branch, worktree, path, process and stash items, each with the fingerprint the audit captured) and runs the bundled executor from the repo:
+
+```bash
+bash ~/.agents/skills/session-cleanup/scripts/clean.sh plan.json --dry-run   # prints what it would do, changes nothing
+bash ~/.agents/skills/session-cleanup/scripts/clean.sh plan.json
+```
+
+- **Re-verification.** Right before acting, each item is checked against its fingerprint (branch tip, worktree HEAD and cleanliness, path size and mtime, process start time and command, stash SHA). Anything that moved is skipped as `changed since audit`; anything unsafe is skipped as `refused (...)`.
+- **Hard limits.** No `--force`, no `kill -9`, no globs. Forced branch deletion is `git update-ref -d` with the recorded tip. It refuses symlinks in any path component, `.env`, key and credential files anywhere (even inside build output such as `.next/standalone`), open files (`lsof`), and `coverage/`.
+- **Ledger and restore.** Each completed action appends one JSON line to `${XDG_STATE_HOME:-~/.local/state}/session-cleanup/ledger.jsonl`, with a shell-quoted restore command for branches, stashes and worktrees. A worktree restore recreates its branch from the recorded HEAD if needed.
+- **Recoverable means on the remote.** The audit tags branches and worktrees with `on_<remote>=yes|no` (an ancestor of the remote's main, or no missing patches and no merge commits), and worktrees with `user_ignored_files=N` (ignored files that do not regenerate).
 
 ## How it knows what "this session" created
 
@@ -176,6 +190,8 @@ listening_ports (only for the processes above):
   pid=164662 listen=127.0.0.1:3000
 ```
 
+Branch and worktree lines also carry `on_origin=yes|no`, and worktree lines `user_ignored_files=N`.
+
 Outside a Claude Code session the session ID is unknown, so ownership tags fall back to `in_repo` only and timestamps are tagged `pre_session`.
 
 ## Example report
@@ -209,11 +225,13 @@ session-cleanup/
 ├── SKILL.md              # skill instructions: phases, classification, safety rules, report format
 ├── scripts/
 │   ├── audit.sh          # read-only audit, Linux and macOS (bash 3.2+)
+│   ├── clean.sh          # executes an approved plan with re-verification and a restore ledger
 │   └── audit.ps1         # read-only audit, Windows (PowerShell 5.1+)
 └── evals/                # test cases in the `claude plugin eval` format
     ├── plain-git-mixed-leftovers/
     ├── mostly-clean-repo/
     ├── benchmark-iteration-1.md  # first eval run: with vs without the skill
+    ├── clean-test.sh     # deterministic executor tests
     ├── smoke.sh          # builds a fixture and runs audit.sh against it (Linux, macOS)
     └── smoke.ps1         # same for audit.ps1 (Windows)
 ```
