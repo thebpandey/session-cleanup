@@ -43,8 +43,9 @@ under() { awk -v r="$1" '$0==r || index($0, r "/")==1 {f=1} END{exit !f}'; } # s
 
 COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
 MAIN_WT=$(dirname "$COMMON")
-# Ignored output that regenerates on the next build; same set as lanes worktree-tools.py cleanup().
-REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo|coverage)(/|$)|\.(pyc|tsbuildinfo)$'
+# Ignored output that regenerates on the next build: lanes worktree-tools.py cleanup()'s set minus coverage,
+# which is evidence (ASK in SKILL.md).
+REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo)(/|$)|\.(pyc|tsbuildinfo)$'
 SECRET_FIND='-name .env* -o -name *.pem -o -name *.key -o -name id_rsa* -o -name id_ed25519* -o -name id_ecdsa* -o -name *.p12 -o -name *.pfx -o -name *credential* -o -name *secret*'
 # has_secret <dir>: any env, key or credential file anywhere inside, including ignored build output
 # (Next.js standalone copies .env). Templates such as .env.example are allowed.

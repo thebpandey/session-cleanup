@@ -62,8 +62,9 @@ on_remote() {
   case "$c" in *"+ "*) echo no; return ;; esac
   [ -z "$(git rev-list --merges "$r..$1" 2>/dev/null)" ] && echo yes || echo no
 }
-# Ignored output that regenerates on the next build; same set as lanes worktree-tools.py cleanup().
-REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo|coverage)(/|$)|\.(pyc|tsbuildinfo)$'
+# Ignored output that regenerates on the next build: lanes worktree-tools.py cleanup()'s set minus coverage,
+# which is evidence (ASK in SKILL.md).
+REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo)(/|$)|\.(pyc|tsbuildinfo)$'
 # ps etime ([[dd-]hh:]mm:ss) -> seconds; works with GNU and BSD ps
 etime2s() {
   local e="$1" d=0 h=0 m=0 s=0

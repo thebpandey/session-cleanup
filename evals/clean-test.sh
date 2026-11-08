@@ -13,7 +13,7 @@ has() { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
 
 cd "$D" && git init -q -b main repo && cd repo || exit 1
 git config user.email t@example.com; git config user.name tester; git config commit.gpgsign false
-echo a > a; echo .next/ > .gitignore; git add a .gitignore; git commit -qm init
+echo a > a; printf '.next/\ncoverage/\n' > .gitignore; git add a .gitignore; git commit -qm init
 git branch merged; git branch moved
 MERGED_TIP=$(git rev-parse merged); MOVED_TIP=$(git rev-parse moved)
 git checkout -q -b unmerged; echo u > u; git add u; git commit -qm unmerged; git checkout -q main
@@ -26,6 +26,8 @@ git checkout -q -b mergeonly main; git merge -q --no-ff side -m "merge with its 
 git worktree add -q "$D/repo/.claude/worktrees/busy" -b wt/busy; BUSY_HEAD=$(git -C .claude/worktrees/busy rev-parse HEAD)
 (cd .claude/worktrees/busy && exec sleep 60) & BUSY_PID=$!
 # decoy is a symlink to another clean worktree with the same HEAD.
+git worktree add -q "$D/repo/.claude/worktrees/cov" -b wt/cov; COV_HEAD=$(git -C .claude/worktrees/cov rev-parse HEAD)
+mkdir .claude/worktrees/cov/coverage; echo 1 > .claude/worktrees/cov/coverage/lcov.info
 git worktree add -q "$D/repo/.claude/worktrees/drop" -b wt/drop; DROP_HEAD=$(git -C .claude/worktrees/drop rev-parse HEAD)
 git worktree add -q "$D/repo/.claude/worktrees/adv" -b wt/adv; ADV_HEAD=$(git -C .claude/worktrees/adv rev-parse HEAD)
 git worktree add -q "$D/repo/.claude/worktrees/victim" -b wt/victim; ln -s "$D/repo/.claude/worktrees/victim" .claude/worktrees/decoy
@@ -64,6 +66,7 @@ cat > "$D/plan.json" <<EOF
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/busy", "head": "$BUSY_HEAD"},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/decoy", "head": "$BUSY_HEAD"},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/adv", "head": "$ADV_HEAD"},
+  {"type": "worktree", "path": "$D/repo/.claude/worktrees/cov", "head": "$COV_HEAD"},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/drop", "head": "$DROP_HEAD"},
   {"type": "branch", "name": "wt/drop", "tip": "$DROP_HEAD"},
   {"type": "process", "pid": $P_OK, "cmd": "sleep 120", "start": $P_OK_START},
@@ -124,6 +127,8 @@ expect "stash with an unknown sha or a different message is skipped" $?
 [ ! -e idle ] && [ -f held/f ] && has "skipped: path $D/repo/held: refused (1 open files inside)"
 expect "idle directory deleted; directory with an open file refused" $?
 kill "$P_OK" "$P_KEEP" "$P_HELD" 2>/dev/null
+[ -f .claude/worktrees/cov/coverage/lcov.info ] && has "worktrees/cov: refused (1 ignored files that do not regenerate)"
+expect "worktree with ignored coverage evidence is refused" $?
 [ -d .claude/worktrees/adv ] && has "worktrees/adv: changed since audit (HEAD $ADV_HEAD is now"
 expect "worktree whose HEAD moved after the plan survives" $?
 [ -d .claude/worktrees/victim ] && has "worktrees/decoy: refused (symlink in path"
