@@ -26,6 +26,7 @@ git checkout -q -b mergeonly main; git merge -q --no-ff side -m "merge with its 
 git worktree add -q "$D/repo/.claude/worktrees/busy" -b wt/busy; BUSY_HEAD=$(git -C .claude/worktrees/busy rev-parse HEAD)
 (cd .claude/worktrees/busy && exec sleep 60) & BUSY_PID=$!
 # decoy is a symlink to another clean worktree with the same HEAD.
+git worktree add -q "$D/repo/.claude/worktrees/drop" -b wt/drop; DROP_HEAD=$(git -C .claude/worktrees/drop rev-parse HEAD)
 git worktree add -q "$D/repo/.claude/worktrees/adv" -b wt/adv; ADV_HEAD=$(git -C .claude/worktrees/adv rev-parse HEAD)
 git worktree add -q "$D/repo/.claude/worktrees/victim" -b wt/victim; ln -s "$D/repo/.claude/worktrees/victim" .claude/worktrees/decoy
 # Next.js standalone output copies .env into ignored build output: removing the worktree would delete it.
@@ -63,6 +64,8 @@ cat > "$D/plan.json" <<EOF
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/busy", "head": "$BUSY_HEAD"},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/decoy", "head": "$BUSY_HEAD"},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/adv", "head": "$ADV_HEAD"},
+  {"type": "worktree", "path": "$D/repo/.claude/worktrees/drop", "head": "$DROP_HEAD"},
+  {"type": "branch", "name": "wt/drop", "tip": "$DROP_HEAD"},
   {"type": "process", "pid": $P_OK, "cmd": "sleep 120", "start": $P_OK_START},
   {"type": "process", "pid": $P_KEEP, "cmd": "sleep 121", "start": $((P_KEEP_START - 5))},
   {"type": "process", "pid": $P_KEEP, "cmd": "sleep 999", "start": $P_KEEP_START},
@@ -134,9 +137,17 @@ expect "file changed after the plan survives" $?
 expect "worktree with .env in ignored build output is refused" $?
 ! git show-ref -q refs/heads/unmerged && has "restore: git branch unmerged $UNMERGED_TIP"
 expect "forced branch with matching tip deleted" $?
-[ ! -e junk.log ] && [ "$(grep -c . "$LEDGER")" = 7 ]
-expect "matching file deleted; ledger has exactly the seven completed actions" $?
-RESTORE=$(printf '%s\n' "$OUT" | grep -F "restore: git worktree add" | sed 's/^restore: //')
+[ ! -e junk.log ] && [ "$(grep -c . "$LEDGER")" = 9 ]
+expect "matching file deleted; ledger has exactly the nine completed actions" $?
+# The plan removed the worktree and then its branch; the ledger's restore line must bring both back.
+RESTORE=$(python3 -c 'import json, sys
+for l in open(sys.argv[1]):
+    e = json.loads(l)
+    if e["kind"] == "worktree" and e["target"].endswith("/worktrees/drop"): print(e["restore"])' "$LEDGER")
+[ ! -e .claude/worktrees/drop ] && ! git show-ref -q refs/heads/wt/drop && [ -n "$RESTORE" ] && eval "$RESTORE" >/dev/null 2>&1 &&
+  [ "$(git -C .claude/worktrees/drop rev-parse HEAD)" = "$DROP_HEAD" ] && [ "$(git -C .claude/worktrees/drop branch --show-current)" = wt/drop ]
+expect "worktree restore line works after its branch was also deleted" $?
+RESTORE=$(printf '%s\n' "$OUT" | grep -F "restore: git branch wt/w2 " | sed 's/^restore: //')
 [ ! -e "$SPACED" ] && [ -n "$RESTORE" ] && eval "$RESTORE" >/dev/null 2>&1 && [ -f "$SPACED/a" ]
 expect "restore line for a worktree path with a space round-trips through eval" $?
 

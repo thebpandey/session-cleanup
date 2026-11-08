@@ -142,7 +142,9 @@ do_worktree() {
   if has_secret "$res"; then refuse "$t" "contains an env, key or credential file"; return; fi
   if [ "$OS" = Darwin ] && ! command -v lsof >/dev/null 2>&1; then refuse "$t" "cannot check process cwds: lsof missing"; return; fi
   if cwds | under "$res"; then refuse "$t" "a process has its cwd inside"; return; fi
-  act "$t" "git worktree add $(q "$res") $(q "${br:-$head}")" git worktree remove "$res"
+  # The restore must work even after the plan also deletes the branch.
+  if [ -n "$br" ]; then act "$t" "git branch $(q "$br") $head 2>/dev/null; git worktree add $(q "$res") $(q "$br")" git worktree remove "$res"
+  else act "$t" "git worktree add --detach $(q "$res") $head" git worktree remove "$res"; fi
 }
 
 do_path() {
