@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # machine-test.sh: deterministic checks for audit.sh --machine, clean.sh scratchpad items and machine-sweep.sh.
 # HOME and the /tmp root (SC_TMP_ROOT) are faked inside a temp dir, so the real scratch folders, ledger and
-# report are never touched. Linux only: liveness reads /proc, and macOS always reports unknown.
+# report are never touched. Linux only: it uses GNU date/touch and a /proc environment carrier; the OS is read
+# from uname, so there is no seam to run the macOS branch here.
 # Why: the sweep deletes unattended; each check below guards a way it could delete a live or unproven session.
 set -u
 [ "$(uname -s)" = Linux ] || { echo "machine_test: skipped (Linux only)"; exit 0; }

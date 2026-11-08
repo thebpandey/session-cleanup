@@ -104,10 +104,10 @@ else newest() { find "$1" -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -1;
 # that variable is extracted; no environment is printed). Unreadable processes are ignored: a live Claude Code
 # session rewrites its transcript every turn, so 7 days of transcript inactivity plus no readable carrier is the
 # proof; the residual risk is losing scratch files of a session idle over a week, which are temporary by design.
+# macOS hides every process environment, so there the transcript and scratch ages decide alone.
 scan_envs() {
-  LIVE_IDS="" ENV_PROBE=none
+  LIVE_IDS=""
   [ "$OS" = Linux ] || return 0
-  ENV_PROBE=proc
   LIVE_IDS=$(for e in /proc/[0-9]*/environ; do
       [ -r "$e" ] || continue
       { tr '\0' '\n' < "$e" | sed -n 's/^CLAUDE_CODE_SESSION_ID=//p'; } 2>/dev/null
@@ -117,14 +117,14 @@ scan_envs() {
 tx_of() { local f; for f in "$HOME"/.claude/projects/*/"$1".jsonl; do [ -f "$f" ] && { echo "$f"; return 0; }; done; return 1; }
 # session_live <id> <scratch newest mtime>: yes when a readable process carries the id or the transcript changed in
 # the last 24h; no only when the transcript exists and is 7+ days idle, no readable process carries the id and the
-# scratch folder is 7+ days idle; otherwise unknown (also on macOS, which hides every environment).
+# scratch folder is 7+ days idle; otherwise unknown.
 session_live() {
   local id="$1" nm="${2:-}" tx t
   t=$(date +%s)
   printf '%s\n' "$LIVE_IDS" | grep -qxF -- "$id" && { echo yes; return; }
   tx=$(tx_of "$id")
   [ -n "$tx" ] && [ $(( t - $(mtime "$tx") )) -lt 86400 ] && { echo yes; return; }
-  if [ "$ENV_PROBE" = proc ] && [ -n "$tx" ] && [ $(( t - $(mtime "$tx") )) -ge 604800 ] &&
+  if [ -n "$tx" ] && [ $(( t - $(mtime "$tx") )) -ge 604800 ] &&
      [ -n "$nm" ] && [ $(( t - nm )) -ge 604800 ]; then echo no; else echo unknown; fi
 }
 
@@ -138,8 +138,7 @@ if [ "$MACHINE" = 1 ]; then
   hdr MACHINE
   echo "roots: $ROOTS_ARG"
   scan_envs
-  if [ "$ENV_PROBE" = proc ]; then echo "liveness: readable process environments and transcript age (no = transcript and scratch folder idle 7+ days)"
-  else echo "liveness: transcripts only (this OS hides process environments, so not live means unknown)"; fi
+  echo "liveness: readable process environments and transcript age (no = transcript and scratch folder idle 7+ days)"
   IT=$(mktemp "${TMPDIR:-/tmp}/.sc-machine.XXXXXX") || exit 1
   trap 'rm -f "$IT"' EXIT
   kb() { du -sk "$1" 2>/dev/null | cut -f1; }
