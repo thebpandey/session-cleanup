@@ -110,7 +110,13 @@ do_branch() {
 }
 
 do_worktree() {
-  local p="$a" head="$b" t="worktree $a" res k v cur="" found=0 br="" n
+  local p="$a" head="$b" t="worktree $a" res k v cur="" found=0 br="" n x="${a%/}"
+  # A symlink here could point at another worktree with the same HEAD; check before resolving.
+  while [ -n "$x" ] && [ "$x" != / ] && [ "$x" != . ]; do
+    [ -L "$x" ] && { refuse "$t" "symlink in path ($x)"; return; }
+    [ "$(cd "$x" 2>/dev/null && pwd -P)" = "$MAIN_WT" ] && break
+    x=$(dirname "$x")
+  done
   [ -d "$p" ] || { skip "$t" "folder is gone"; return; }
   res=$(cd "$p" && pwd -P)
   case "$res" in "$MAIN_WT"/*) ;; *) refuse "$t" "outside this repo"; return ;; esac

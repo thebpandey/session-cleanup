@@ -25,6 +25,8 @@ git checkout -q -b mergeonly main; git merge -q --no-ff side -m "merge with its 
 # A clean worktree that a process is using as its cwd.
 git worktree add -q "$D/repo/.claude/worktrees/busy" -b wt/busy; BUSY_HEAD=$(git -C .claude/worktrees/busy rev-parse HEAD)
 (cd .claude/worktrees/busy && exec sleep 60) & BUSY_PID=$!
+# decoy is a symlink to another clean worktree with the same HEAD.
+git worktree add -q "$D/repo/.claude/worktrees/victim" -b wt/victim; ln -s "$D/repo/.claude/worktrees/victim" .claude/worktrees/decoy
 # Next.js standalone output copies .env into ignored build output: removing the worktree would delete it.
 git worktree add -q "$D/repo/.claude/worktrees/next" -b wt/next; NEXT_HEAD=$(git -C .claude/worktrees/next rev-parse HEAD)
 mkdir -p .claude/worktrees/next/.next/standalone; echo FAKE=1 > .claude/worktrees/next/.next/standalone/.env
@@ -46,6 +48,7 @@ cat > "$D/plan.json" <<EOF
   {"type": "path", "path": "$D/repo/changed.log", "kind": "file", "size_bytes": $CHANGED_SIZE},
   {"type": "path", "path": "$D/repo/touched.log", "kind": "file", "mtime": $TOUCHED_MTIME},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/busy", "head": "$BUSY_HEAD"},
+  {"type": "worktree", "path": "$D/repo/.claude/worktrees/decoy", "head": "$BUSY_HEAD"},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/w", "head": "$WT_HEAD"},
   {"type": "path", "path": "$D/repo/junk.log", "kind": "file", "size_bytes": $JUNK_SIZE},
   {"type": "path", "path": "$D/repo/link", "kind": "file", "size_bytes": 2},
@@ -79,6 +82,8 @@ expect "file whose mtime changed after the plan survives" $?
 [ -d .claude/worktrees/busy ] && has "worktrees/busy: refused (a process has its cwd inside)"
 expect "worktree used as a process cwd is refused" $?
 kill "$BUSY_PID" 2>/dev/null
+[ -d .claude/worktrees/victim ] && has "worktrees/decoy: refused (symlink in path"
+expect "symlinked worktree path is refused and its target survives" $?
 AUDIT=$(bash "$SK/scripts/audit.sh" --no-fetch 2>&1)
 printf '%s\n' "$AUDIT" | grep -qE '^  mergeonly .* on_origin=no' && printf '%s\n' "$AUDIT" | grep -qE '^  side .* on_origin=yes'
 expect "audit: branch whose only unpublished commit is a merge is on_origin=no; published branch is yes" $?
