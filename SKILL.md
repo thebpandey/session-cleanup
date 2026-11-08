@@ -25,6 +25,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <skill-dir>\scripts\audit.ps
 
 Both print one section per area (CONTEXT, WORKING_TREE, SYNC, WORKTREES, BRANCHES, STASHES, LANES, PROCESSES, ARTIFACTS, TRACKER, DEPLOY, SESSION_LOG). Its only write is a plain `git fetch` (never `--prune`). It never reads `.env` files or prints process environments.
 
+**Machine scope** (Linux and macOS): when the owner asks about the machine or disk space, or at session end when time allows, also run `bash <skill-dir>/scripts/audit.sh --machine [--roots <dir>[:<dir>]]` (default root `~/dev`). Its MACHINE section ranks items largest first with `reclaimable_safe` and `reclaimable_needs_your_call` totals: Claude scratch folders of other sessions (`session_live=yes|no|unknown`), stray temp entries, linked worktrees, big untracked files, orphaned dev servers and loose files in `/tmp/lanes-<uid>/`. Report findings in that order with both totals. Only `safe` items (dead session, untouched for 7 days) may be cleaned unasked, as `scratchpad` plan items; everything else is ASK or REPORT ONLY.
+
+**Last unattended sweep:** at session start or cleanup, if `~/.local/state/session-cleanup/last-machine-sweep.txt` exists, show its timestamp header and its `ask:` and `report:` lines (the `auto:` lines were already done). `bash <skill-dir>/scripts/install-timer.sh` installs the daily sweep (`machine-sweep.sh`, dead-session scratch folders only; `--remove` uninstalls).
+
 How it decides "this session" (this matters for every classification):
 - **Processes:** `owner=this_session` means this session (or something it launched) started the process. On Linux that is proven by the inherited `CLAUDE_CODE_SESSION_ID`, which survives `nohup`. macOS and Windows hide other processes' environments, so there it means "descendant of the Claude process" (`CLAUDE_PID`); a process that was detached and reparented shows as `started_during_session` instead, which is ASK unless you can trace it in this conversation. `owner=harness_do_not_kill` is Claude Code's own MCP servers and plugins: never touch these. `other_session_or_user` is someone else's.
 - **Files, branches, stashes:** `this_session` / `pre_session` compares the timestamp to `session_start` (first timestamp in this session's transcript). Timestamps are a hint, not proof: something created during the session window could come from a parallel session. Treat an item as this session's only when the timestamp says so **and** you can trace it in this conversation (you ran the command that created it). Otherwise it is ASK.
@@ -42,7 +46,7 @@ Then fill the gaps the script cannot see, in parallel where possible:
 **AUTO-CLEAN** (safe and recoverable; do it through `clean.sh`, then report it). Recoverable means on the remote (`on_origin=yes` in the audit), not just merged into local main:
 - Local branches fully merged into main and `on_origin=yes` (`git branch -d`, never `-D`), excluding main, the current branch, and any branch checked out in a worktree.
 - Prunable worktree records whose folder is already gone (`git worktree prune`).
-- Clean linked worktrees inside this repo (`dirty_files=0`, `user_ignored_files=0`, `on_origin=yes`) whose branch has no commits ahead of main (`git worktree remove <path>`, no `--force`; then `git branch -d`). If the lanes harness owns it, use the harness script instead (see below).
+- Clean linked worktrees inside this repo (`dirty_files=0`, `user_ignored_files=0`, `on_origin=yes`) whose branch has no commits ahead of main (`git worktree remove <path>`, no `--force`; then `git branch -d`). If the lanes harness owns it, defer to its sweep instead (see below).
 - Temp folders whose lane or branch no longer exists and that no process has open (`open_handles=0`; recheck with `lsof +D <dir>` immediately before deleting).
 - Processes with `owner=this_session` that you can trace to this conversation and that are idle or no longer needed (dev servers, watchers, headless browsers). Kill by PID only (`kill <pid>` on Linux/macOS, `Stop-Process -Id <pid>` on Windows).
 - Stale build type caches (`.next/types`, `.next/dev/types`) that are gitignored. These regenerate on the next build.
@@ -62,7 +66,7 @@ Then fill the gaps the script cannot see, in parallel where possible:
 
 ## Executing the cleanup
 
-AUTO-CLEAN items and owner-approved ASK items run through the bundled executor, never through hand-typed `git branch`, `git worktree remove`, `git stash drop`, `rm` or `kill` commands (`git worktree prune` and the lanes harness script are the only exceptions). Write a plan to the scratchpad and run it from the repo:
+AUTO-CLEAN items and owner-approved ASK items run through the bundled executor, never through hand-typed `git branch`, `git worktree remove`, `git stash drop`, `rm` or `kill` commands (`git worktree prune` and the lanes `cleanup.sh --sweep` are the only exceptions). Write a plan to the scratchpad and run it from the repo:
 
 ```bash
 bash <skill-dir>/scripts/clean.sh <scratchpad>/cleanup-plan.json --dry-run   # check, then run without --dry-run
@@ -76,7 +80,8 @@ The plan is a JSON array; copy each fingerprint from the audit output, never fro
  {"type": "worktree", "path": "<linked: path>", "head": "<head=>"},
  {"type": "path", "path": "/abs/path", "kind": "file", "mtime": <mtime=>},
  {"type": "process", "pid": <pid=>, "cmd": "<cmd=>", "start": <start=>},
- {"type": "stash", "sha": "<sha=>", "message": "<text after ::>"}]
+ {"type": "stash", "sha": "<sha=>", "message": "<text after ::>"},
+ {"type": "scratchpad", "path": "<scratchpad: path>", "session_id": "<session_id=>", "mtime": <newest_mtime=>}]
 ```
 
 `force` (deletes an unmerged branch) goes only on a branch the owner approved. The executor re-checks every target and skips anything that changed since the audit; quote its `skipped:` and `restore:` lines verbatim in the report. Completed actions are logged with their restore command in `~/.local/state/session-cleanup/ledger.jsonl`. Windows has no executor yet: there, show each command and its restore line before running it.
@@ -92,13 +97,13 @@ These protect work that cannot be recreated. Each one exists because the obvious
 - **Never** use bare `git stash`, `git reset --hard`, `git clean -fdx` (or any `git clean -f`), or `rm -rf` with a glob. These have no undo. Delete named paths one at a time.
 - `git branch -D` and `git stash drop` run only on the single item the owner approved, after showing what will be lost (commits, diff stat). `git worktree remove --force` is never used; a dirty worktree stays until the owner saves or discards its changes.
 - **Never read, print, move or delete `.env` files, keys or credentials**, even when they look like junk. Report them by path only.
-- **Stay inside this repo.** Other apps' worktrees, detached checkouts or shared `/tmp` folders are reported, not touched. Never glob-delete in `/tmp`.
+- **Stay inside this repo.** Other apps' worktrees, detached checkouts or shared `/tmp` folders are reported, not touched; the one exception is a `safe` scratch folder from `audit.sh --machine`, as a `scratchpad` plan item. Never glob-delete in `/tmp`.
 - **Never kill `harness_do_not_kill` processes** or the Claude process itself.
 
 ### When the lanes harness is present
 
 Only if the LANES section shows a state dir. Otherwise skip this block.
-- Remove lane worktrees, lane temp dirs, relay job dirs and `lanes.tsv` rows with the harness's own script, never with `rm`: `bash ~/.claude/skills/lanes/lane/cleanup.sh <lane-dir> <branch>` for a merged lane, then `bash ~/.claude/skills/lanes/lane/cleanup.sh --sweep`. Run it from the main worktree.
+- Lanes owns its artifacts (lane worktrees, lane temp dirs, relay job dirs, `lanes.tsv` rows); never classify or remove them yourself. From the main worktree run `bash ~/.claude/skills/lanes/lane/cleanup.sh --sweep --dry-run`, show its `auto:`/`ask:`/`report:` lines, then run `--sweep` without `--dry-run` for the `auto:` items. Never call `cleanup.sh <lane-dir> <branch>` directly; that is `lane-finish.sh`'s job.
 - `WORKTREE_MISSING` and `BRANCH_MERGED` (merged into origin's main) rows go through the sweep. `MERGED_NOT_ON_origin` rows are merged locally but unpushed: REPORT ONLY, recommend `lane-finish.sh --push`. Rows for unmerged lanes are ASK.
 - Relay jobs still running (no `rc` file) are REPORT ONLY; the lanes watchdog owns them.
 - In a `/lanes` session the main lane integrates; do not delete a lane branch whose work is not yet merged to origin/main.
