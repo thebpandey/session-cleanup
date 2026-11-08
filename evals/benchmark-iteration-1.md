@@ -1,6 +1,6 @@
 # Skill Benchmark: session-cleanup
 
-**Model**: <model-name>
+**Model**: Claude Sonnet
 **Date**: 2026-11-06T23:20:07Z
 **Evals**: mostly-clean-repo, plain-git-mixed-leftovers (1 run each per configuration)
 
