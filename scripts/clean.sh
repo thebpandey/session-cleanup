@@ -75,6 +75,17 @@ $ROOTS
 EOF
   return 1
 }
+# symlink_in <path>: prints the first symlink component from the leaf up to its allowed root. A symlink
+# anywhere could redirect the delete to another target that has the same fingerprint, so check before resolving.
+symlink_in() {
+  local x="${1%/}" r
+  while [ -n "$x" ] && [ "$x" != / ] && [ "$x" != . ]; do
+    [ -L "$x" ] && { echo "$x"; return 0; }
+    r=$(cd "$x" 2>/dev/null && pwd -P) && printf '%s\n' "$ROOTS" | grep -qxF -- "$r" && return 1
+    x=$(dirname "$x")
+  done
+  return 1
+}
 
 LEDGER="${XDG_STATE_HOME:-$HOME/.local/state}/session-cleanup/ledger.jsonl"
 ledger() { # ledger <target> <restore>
@@ -110,13 +121,8 @@ do_branch() {
 }
 
 do_worktree() {
-  local p="$a" head="$b" t="worktree $a" res k v cur="" found=0 br="" n x="${a%/}"
-  # A symlink here could point at another worktree with the same HEAD; check before resolving.
-  while [ -n "$x" ] && [ "$x" != / ] && [ "$x" != . ]; do
-    [ -L "$x" ] && { refuse "$t" "symlink in path ($x)"; return; }
-    [ "$(cd "$x" 2>/dev/null && pwd -P)" = "$MAIN_WT" ] && break
-    x=$(dirname "$x")
-  done
+  local p="$a" head="$b" t="worktree $a" res k v cur="" found=0 br="" n x
+  x=$(symlink_in "$p") && { refuse "$t" "symlink in path ($x)"; return; }
   [ -d "$p" ] || { skip "$t" "folder is gone"; return; }
   res=$(cd "$p" && pwd -P)
   case "$res" in "$MAIN_WT"/*) ;; *) refuse "$t" "outside this repo"; return ;; esac
@@ -140,9 +146,9 @@ do_worktree() {
 }
 
 do_path() {
-  local p="$a" kind="$b" size="$c" mt="$d" t="path $a" base res n
+  local p="$a" kind="$b" size="$c" mt="$d" t="path $a" base res n x
   case "$p" in /*) ;; *) refuse "$t" "not an absolute path"; return ;; esac
-  [ -L "$p" ] && { refuse "$t" "symlink"; return; }
+  x=$(symlink_in "$p") && { refuse "$t" "symlink in path ($x)"; return; }
   [ -e "$p" ] || { skip "$t" "path is gone"; return; }
   base=$(basename "$p")
   case "$base" in .env*|*.pem|*.key|id_rsa*|id_ed25519*|id_ecdsa*|*.p12|*.pfx|*credential*|*secret*)

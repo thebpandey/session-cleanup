@@ -35,6 +35,7 @@ git worktree add -q "$SPACED" -b wt/w2; W2_HEAD=$(git -C "$SPACED" rev-parse HEA
 git worktree add -q "$D/repo/.claude/worktrees/w" -b wt/w; WT_HEAD=$(git -C .claude/worktrees/w rev-parse HEAD)
 echo unsaved > .claude/worktrees/w/notes.md
 echo junk > junk.log; ln -s "$D/repo/a" link; echo FAKE=1 > .env
+mkdir realdir; echo keep > realdir/victim.log; ln -s realdir linkdir
 JUNK_SIZE=$(wc -c < junk.log | tr -d ' ')
 echo before > changed.log; CHANGED_SIZE=$(wc -c < changed.log | tr -d ' ')
 echo old > touched.log; touch -t 202001010000 touched.log; TOUCHED_MTIME=$(cd "$D/repo" && python3 -c 'import os; print(int(os.stat("touched.log").st_mtime))')
@@ -52,6 +53,7 @@ cat > "$D/plan.json" <<EOF
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/w", "head": "$WT_HEAD"},
   {"type": "path", "path": "$D/repo/junk.log", "kind": "file", "size_bytes": $JUNK_SIZE},
   {"type": "path", "path": "$D/repo/link", "kind": "file", "size_bytes": 2},
+  {"type": "path", "path": "$D/repo/linkdir/victim.log", "kind": "file", "size_bytes": 5},
   {"type": "path", "path": "$D/repo/.env", "kind": "file", "size_bytes": 7}
 ]
 EOF
@@ -73,8 +75,10 @@ git show-ref -q refs/heads/moved && has "skipped: branch moved: changed since au
 expect "branch whose tip moved after the plan is skipped" $?
 [ -d .claude/worktrees/w ] && has "skipped: worktree $D/repo/.claude/worktrees/w: refused (dirty"
 expect "dirty worktree is refused" $?
-[ -L link ] && has "skipped: path $D/repo/link: refused (symlink)"
+[ -L link ] && has "skipped: path $D/repo/link: refused (symlink in path ($D/repo/link))"
 expect "symlinked path is refused" $?
+[ -f realdir/victim.log ] && has "skipped: path $D/repo/linkdir/victim.log: refused (symlink in path ($D/repo/linkdir))"
+expect "path through a symlinked parent is refused and its target survives" $?
 [ -f .env ] && has "skipped: path $D/repo/.env: refused (env, key or credential file)"
 expect ".env path is refused" $?
 [ -f touched.log ] && has "skipped: path $D/repo/touched.log: changed since audit (mtime $TOUCHED_MTIME is now"
