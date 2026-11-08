@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# clean.sh <plan.json | -> [--dry-run]     (- reads the plan from stdin)
+# clean.sh <plan.json> [--dry-run]
 #
 # Executes an approved cleanup plan (written from scripts/audit.sh output). Right before acting it
 # re-checks every target against the fingerprint captured at audit time; anything changed or unsafe
 # is skipped, never forced. Each completed action is appended to the ledger with its restore command.
-# Plan: JSON array of {"type": "branch"|"worktree"|"path"|"process"|"stash"|"scratchpad", ...fingerprint}.
-# scratchpad items (from audit.sh --machine) need no repo; every other type must run from inside the repo.
+# Plan: JSON array of {"type": "branch"|"worktree"|"path"|"process"|"stash", ...fingerprint}.
 # Exit: 0 every item done or skipped, 1 a command failed or an item was invalid, 2 bad usage or plan.
 # Compatible with bash 3.2 (macOS default) and GNU or BSD userland; needs python3 for JSON.
 set -uo pipefail
@@ -18,12 +17,10 @@ for arg in "$@"; do
     *) PLAN="$arg" ;;
   esac
 done
-PLAN_JSON=""
-if [ "$PLAN" = - ]; then PLAN_JSON=$(cat)
-else [ -f "$PLAN" ] || { echo "usage: clean.sh <plan.json | -> [--dry-run]" >&2; exit 2; }; fi
-IN_GIT=0; git rev-parse --git-dir >/dev/null 2>&1 && IN_GIT=1
+[ -f "$PLAN" ] || { echo "usage: clean.sh <plan.json> [--dry-run]" >&2; exit 2; }
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "error: run clean.sh from inside the repo" >&2; exit 2; }
 
-OS=$(uname -s); mine=${SC_TEST_UID:-$(id -u)}   # SC_TEST_UID: evals/machine-test.sh only
+OS=$(uname -s); mine=$(id -u)
 if [ "$OS" = Darwin ]; then
   mtime() { stat -f %m "$1" 2>/dev/null; }
   fuid() { stat -f %u "$1" 2>/dev/null; }
@@ -44,8 +41,8 @@ pstart() { local s; s=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null) && [ -n "$s"
 q() { printf '%q' "$1"; }  # shell-quote one restore-command argument
 under() { awk -v r="$1" '$0==r || index($0, r "/")==1 {f=1} END{exit !f}'; } # stdin has a path at or under $1
 
-MAIN_WT=""
-[ "$IN_GIT" = 1 ] && MAIN_WT=$(dirname "$(cd "$(git rev-parse --git-common-dir)" && pwd -P)")
+COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+MAIN_WT=$(dirname "$COMMON")
 # Ignored output that regenerates on the next build: lanes worktree-tools.py cleanup()'s set minus coverage,
 # which is evidence (ASK in SKILL.md).
 REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo)(/|$)|\.(pyc|tsbuildinfo)$'
@@ -58,7 +55,7 @@ has_secret() {
 }
 
 # Paths may be deleted only strictly inside: this repo, this session's scratchpad, the user's own TMPDIR.
-ROOTS="$MAIN_WT"   # empty outside a repo: then only scratchpad items run (see the dispatch loop)
+ROOTS="$MAIN_WT"
 SID="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -n "$SID" ]; then
   for s in /tmp/claude-"$mine"/*/"$SID"/scratchpad "${TMPDIR:-/tmp}"/claude-"$mine"/*/"$SID"/scratchpad; do
@@ -98,7 +95,7 @@ import json, sys, time
 repo, kind, target, item, restore = sys.argv[1:]
 print(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "repo": repo, "kind": kind,
                   "target": target, "fingerprint": json.loads(item), "restore": restore}))' \
-    "${MAIN_WT:-none}" "$type" "$1" "$item" "$2" >> "$LEDGER"
+    "$MAIN_WT" "$type" "$1" "$item" "$2" >> "$LEDGER"
 }
 
 FAIL=0
@@ -207,57 +204,13 @@ do_stash() {
   act "$t" "git stash store -m $(q "$msg") $sha" git stash drop -q "$ref"
 }
 
-# Scratch folders of Claude Code sessions: <base>/<project>/<session-id>/. SC_TMP_ROOT (replaces /tmp) is for
-# evals/machine-test.sh only. The same bases and liveness rule as audit.sh --machine.
-TMP_BASE="${SC_TMP_ROOT:-/tmp}"
-claude_bases() {
-  echo "$TMP_BASE/claude-$mine"
-  [ -z "${SC_TMP_ROOT:-}" ] && [ -n "${TMPDIR:-}" ] && [ "${TMPDIR%/}" != /tmp ] && echo "${TMPDIR%/}/claude-$mine"
-  return 0
-}
-if [ "$OS" = Darwin ]; then newest() { find "$1" -exec stat -f %m {} + 2>/dev/null | sort -n | tail -1; }
-else newest() { find "$1" -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -1; }; fi
-
-# Symlinks above the scratch root are allowed (macOS /tmp -> /private/tmp); the root is resolved once and nothing
-# from the real root down to the target may be a symlink.
-do_scratchpad() {
-  local p="${a%/}" sid="$b" mt="$c" t="scratchpad $a" proj base r ok=0 x rr res live n
-  printf '%s\n' "$sid" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || { refuse "$t" "session_id is not a session id"; return; }
-  [ "$(basename "$p")" = "$sid" ] || { refuse "$t" "path does not end in its session id"; return; }
-  proj=$(basename "$(dirname "$p")"); base=$(dirname "$(dirname "$p")")
-  case "$proj" in .|..|/) refuse "$t" "not a project folder"; return ;; esac
-  while IFS= read -r r; do [ "$base" = "$r" ] && ok=1; done <<EOF
-$(claude_bases)
-EOF
-  [ "$ok" = 1 ] || { refuse "$t" "not <claude scratch root>/<project>/<session-id>"; return; }
-  rr=$(cd "$base" 2>/dev/null && pwd -P) || { skip "$t" "scratch root is gone"; return; }
-  for x in "$rr/$proj" "$rr/$proj/$sid"; do [ -L "$x" ] && { refuse "$t" "symlink in path ($x)"; return; }; done
-  [ -d "$rr/$proj/$sid" ] || { skip "$t" "folder is gone"; return; }
-  res=$(cd "$rr/$proj/$sid" && pwd -P)
-  [ "$res" = "$rr/$proj/$sid" ] || { refuse "$t" "resolves outside its scratch root ($res)"; return; }
-  for x in "$rr" "$rr/$proj" "$res"; do [ "$(fuid "$x")" = "$mine" ] || { refuse "$t" "not owned by you ($x)"; return; }; done
-  [ -z "$(find "$rr" -maxdepth 0 \( -perm -g+w -o -perm -o+w \) -print)" ] || { refuse "$t" "scratch root $rr is group or world writable"; return; }
-  n=$(newest "$res")
-  [ "$n" = "$mt" ] || { skip "$t" "newest mtime $mt is now $n"; return; }
-  # The audit's rule, re-run now: covers the transcript, readable carriers and the 7-day scratch age.
-  live=$(bash "$(dirname "$0")/audit.sh" --session-live "$sid" "$n" | awk '{print $2}')
-  [ "$live" = no ] || { refuse "$t" "session_live=${live:-unknown}"; return; }
-  if has_secret "$res"; then refuse "$t" "contains an env, key or credential file"; return; fi
-  [ -z "$(find "$res" -name .git -print 2>/dev/null | head -1)" ] || { refuse "$t" "contains a git checkout"; return; }
-  command -v lsof >/dev/null 2>&1 || { refuse "$t" "cannot check open files: lsof missing"; return; }
-  n=$(lsof +D "$res" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
-  [ "$n" = 0 ] || { refuse "$t" "$n open files inside"; return; }
-  act "$t" none rm -rf -- "$res"
-}
-
 # One tab-separated line per item: type, four fields ("-" when empty, since read collapses tabs), item JSON.
-ITEMS=$(PLAN_JSON="$PLAN_JSON" python3 - "$PLAN" <<'PY'
-import json, os, sys
+ITEMS=$(python3 - "$PLAN" <<'PY'
+import json, sys
 FIELDS = {'branch': ('name', 'tip'), 'worktree': ('path', 'head'), 'path': ('path', 'kind'),
-          'process': ('pid', 'cmd', 'start'), 'stash': ('sha', 'message'),
-          'scratchpad': ('path', 'session_id', 'mtime')}
+          'process': ('pid', 'cmd', 'start'), 'stash': ('sha', 'message')}
 try:
-    plan = json.loads(os.environ['PLAN_JSON']) if sys.argv[1] == '-' else json.load(open(sys.argv[1]))
+    plan = json.load(open(sys.argv[1]))
 except (OSError, ValueError) as e:
     sys.exit('error: cannot read plan: %s' % e)
 if not isinstance(plan, list):
@@ -283,15 +236,12 @@ PY
 
 while IFS=$'\t' read -r type a b c d item; do
   [ -n "$type" ] || continue
-  case "$IN_GIT:$type" in 0:scratchpad|0:invalid|1:*) ;;
-    *) echo "skipped: $type $a: refused (run clean.sh from inside the repo)"; FAIL=1; continue ;; esac
   case "$type" in
     branch) do_branch ;;
     worktree) do_worktree ;;
     path) do_path ;;
     process) do_process ;;
     stash) do_stash ;;
-    scratchpad) do_scratchpad ;;
     invalid) echo "skipped: $a: invalid plan item ($b)"; FAIL=1 ;;
   esac
 done <<EOF
