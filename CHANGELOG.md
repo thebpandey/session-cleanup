@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0 — 2026-11-08
+
+- New `scripts/audit.sh --machine [--roots <dir>[:<dir>]]`: a size-ranked machine report (Linux and macOS) of Claude scratchpads with session liveness, orphaned dev servers, big untracked files and worktrees. Lane artifacts are listed but left to the lanes sweep. It totals `reclaimable_safe` and `reclaimable_needs_your_call`.
+- `clean.sh` gains a `scratchpad` plan type for Claude scratch folders of other sessions.
+- New `scripts/machine-sweep.sh [--dry-run]`, unattended: it deletes only scratchpads of dead sessions (transcript and scratchpad idle 7 days, no readable process carrying the session id), through `clean.sh`. Everything else is reported to `~/.local/state/session-cleanup/last-machine-sweep.txt`.
+- New `scripts/install-timer.sh [--remove]`: installs a daily systemd user timer for the sweep on Linux, and prints a scheduling hint elsewhere (macOS).
+- `evals/machine-test.sh` covers the machine report and sweep.
+
 ## 1.1.0 — 2026-11-08
 
 - New `scripts/clean.sh <plan.json> [--dry-run]` executes an approved plan of branches, worktrees, paths, processes and stashes. `--dry-run` prints what it would do and changes nothing.
