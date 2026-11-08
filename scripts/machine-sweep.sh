@@ -24,35 +24,31 @@ if [ "$DRY" = 0 ]; then # a dry run writes nothing, so it takes no lock
   flock -n 9 || { echo "machine-sweep: another run is in progress"; exit 0; }
 fi
 
-W=$(mktemp -d "${TMPDIR:-/tmp}/sc-sweep.XXXXXX") || exit 1
-trap 'rm -rf "$W"' EXIT
-cd "$W" || exit 1   # clean.sh runs outside any repo: only scratchpad items are allowed there
-
-bash "$SK/audit.sh" --machine > audit.txt 2>&1; arc=$?
+# Everything is held in memory: a dry run writes nothing (audit.sh keeps one temp file under TMPDIR).
+cd / || exit 1   # outside any repo, clean.sh accepts only scratchpad items
+AUD=$(bash "$SK/audit.sh" --machine 2>&1); arc=$?
 # The plan holds only safe scratchpads, with the fingerprint clean.sh re-checks.
-python3 - audit.txt > plan.json <<'PY'
+PLAN=$(printf '%s\n' "$AUD" | python3 -c '
 import json, re, sys
-pat = re.compile(r'^  \S+ safe scratchpad: (.+) session_id=(\S+) newest_mtime=(\d+) ')
-plan = [{'type': 'scratchpad', 'path': m.group(1), 'session_id': m.group(2), 'mtime': int(m.group(3))}
-        for m in map(pat.match, open(sys.argv[1])) if m]
-json.dump(plan, sys.stdout)
-PY
-if [ "$DRY" = 1 ]; then bash "$SK/clean.sh" plan.json --dry-run > clean.txt 2>&1; crc=$?
-else bash "$SK/clean.sh" plan.json > clean.txt 2>&1; crc=$?; fi
+pat = re.compile(r"^  \S+ safe scratchpad: (.+) session_id=(\S+) newest_mtime=(\d+) ")
+print(json.dumps([{"type": "scratchpad", "path": m.group(1), "session_id": m.group(2), "mtime": int(m.group(3))}
+                  for m in map(pat.match, sys.stdin) if m]))')
+if [ "$DRY" = 1 ]; then CL=$(printf '%s\n' "$PLAN" | bash "$SK/clean.sh" - --dry-run 2>&1); crc=$?
+else CL=$(printf '%s\n' "$PLAN" | bash "$SK/clean.sh" - 2>&1); crc=$?; fi
 
-{
+REPORT=$(
   echo "# session-cleanup machine sweep $(date -u +%Y-%m-%dT%H:%M:%SZ)$([ "$DRY" = 1 ] && echo ' (dry-run)') audit_rc=$arc clean_rc=$crc"
-  grep -E '^reclaimable_' audit.txt | sed 's/^/report: /'
+  printf '%s\n' "$AUD" | grep -E '^reclaimable_' | sed 's/^/report: /'
   # clean.sh results: done/restore/would are automatic; a refused or changed scratchpad is the owner's call.
-  awk '/^(done|would|restore): /{print "auto: " $0} /^(skipped|failed): /{print "ask: " $0}' clean.txt
-  awk '/^items /{s="i"} /^dev_servers_orphaned/{s="d"} /^repos:/{s="r"} /^$/{s=""}
+  printf '%s\n' "$CL" | awk '/^(done|would|restore): /{print "auto: " $0} /^(skipped|failed): /{print "ask: " $0}'
+  printf '%s\n' "$AUD" | awk '/^items /{s="i"} /^dev_servers_orphaned/{s="d"} /^repos:/{s="r"} /^$/{s=""}
     s=="i" && ($2=="ask" || $2=="report") {c=$2; sub(/^  [^ ]+ [a-z]+ /, ""); print c ": " $0}
     s=="d" && /^  pid=/ {sub(/^  /, ""); print "report: orphaned dev server: " $0}
-    s=="r" && /lanes: run/ {sub(/^  /, ""); print "report: " $0}' audit.txt
-  [ "$arc" = 0 ] || echo "ask: audit.sh --machine exited $arc: $(tail -1 audit.txt)"
-} > report.txt
+    s=="r" && /lanes: run/ {sub(/^  /, ""); print "report: " $0}'
+  [ "$arc" = 0 ] || echo "ask: audit.sh --machine exited $arc: $(printf '%s\n' "$AUD" | tail -1)"
+)
 
-if [ "$DRY" = 1 ]; then cat report.txt; exit "$crc"; fi
-cp report.txt "$ST/.last-machine-sweep.tmp" && mv -f "$ST/.last-machine-sweep.tmp" "$ST/last-machine-sweep.txt"
-cat report.txt
+printf '%s\n' "$REPORT"
+[ "$DRY" = 1 ] && exit "$crc"
+printf '%s\n' "$REPORT" > "$ST/.last-machine-sweep.tmp" && mv -f "$ST/.last-machine-sweep.tmp" "$ST/last-machine-sweep.txt"
 exit "$crc"

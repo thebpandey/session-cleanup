@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# clean.sh <plan.json> [--dry-run]
+# clean.sh <plan.json | -> [--dry-run]     (- reads the plan from stdin)
 #
 # Executes an approved cleanup plan (written from scripts/audit.sh output). Right before acting it
 # re-checks every target against the fingerprint captured at audit time; anything changed or unsafe
@@ -18,10 +18,12 @@ for arg in "$@"; do
     *) PLAN="$arg" ;;
   esac
 done
-[ -f "$PLAN" ] || { echo "usage: clean.sh <plan.json> [--dry-run]" >&2; exit 2; }
+PLAN_JSON=""
+if [ "$PLAN" = - ]; then PLAN_JSON=$(cat)
+else [ -f "$PLAN" ] || { echo "usage: clean.sh <plan.json | -> [--dry-run]" >&2; exit 2; }; fi
 IN_GIT=0; git rev-parse --git-dir >/dev/null 2>&1 && IN_GIT=1
 
-OS=$(uname -s); mine=$(id -u)
+OS=$(uname -s); mine=${SC_TEST_UID:-$(id -u)}   # SC_TEST_UID: evals/machine-test.sh only
 if [ "$OS" = Darwin ]; then
   mtime() { stat -f %m "$1" 2>/dev/null; }
   fuid() { stat -f %u "$1" 2>/dev/null; }
@@ -216,40 +218,46 @@ claude_bases() {
 if [ "$OS" = Darwin ]; then newest() { find "$1" -exec stat -f %m {} + 2>/dev/null | sort -n | tail -1; }
 else newest() { find "$1" -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -1; }; fi
 
+# Symlinks above the scratch root are allowed (macOS /tmp -> /private/tmp); the root is resolved once and nothing
+# from the real root down to the target may be a symlink.
 do_scratchpad() {
-  local p="${a%/}" sid="$b" mt="$c" t="scratchpad $a" proj base r ok=0 x live n
+  local p="${a%/}" sid="$b" mt="$c" t="scratchpad $a" proj base r ok=0 x rr res live n
   printf '%s\n' "$sid" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || { refuse "$t" "session_id is not a session id"; return; }
   [ "$(basename "$p")" = "$sid" ] || { refuse "$t" "path does not end in its session id"; return; }
-  proj=$(dirname "$p"); base=$(dirname "$proj")
-  case "$(basename "$proj")" in .|..) refuse "$t" "not a project folder"; return ;; esac
+  proj=$(basename "$(dirname "$p")"); base=$(dirname "$(dirname "$p")")
+  case "$proj" in .|..|/) refuse "$t" "not a project folder"; return ;; esac
   while IFS= read -r r; do [ "$base" = "$r" ] && ok=1; done <<EOF
 $(claude_bases)
 EOF
   [ "$ok" = 1 ] || { refuse "$t" "not <claude scratch root>/<project>/<session-id>"; return; }
-  for x in "$base" "$proj" "$p"; do [ -L "$x" ] && { refuse "$t" "symlink in path ($x)"; return; }; done
-  [ -d "$p" ] || { skip "$t" "folder is gone"; return; }
-  for x in "$base" "$proj" "$p"; do [ "$(fuid "$x")" = "$mine" ] || { refuse "$t" "not owned by you ($x)"; return; }; done
-  n=$(newest "$p")
+  rr=$(cd "$base" 2>/dev/null && pwd -P) || { skip "$t" "scratch root is gone"; return; }
+  for x in "$rr/$proj" "$rr/$proj/$sid"; do [ -L "$x" ] && { refuse "$t" "symlink in path ($x)"; return; }; done
+  [ -d "$rr/$proj/$sid" ] || { skip "$t" "folder is gone"; return; }
+  res=$(cd "$rr/$proj/$sid" && pwd -P)
+  [ "$res" = "$rr/$proj/$sid" ] || { refuse "$t" "resolves outside its scratch root ($res)"; return; }
+  for x in "$rr" "$rr/$proj" "$res"; do [ "$(fuid "$x")" = "$mine" ] || { refuse "$t" "not owned by you ($x)"; return; }; done
+  [ -z "$(find "$rr" -maxdepth 0 \( -perm -g+w -o -perm -o+w \) -print)" ] || { refuse "$t" "scratch root $rr is group or world writable"; return; }
+  n=$(newest "$res")
   [ "$n" = "$mt" ] || { skip "$t" "newest mtime $mt is now $n"; return; }
   # The audit's rule, re-run now: covers the transcript, readable carriers and the 7-day scratch age.
   live=$(bash "$(dirname "$0")/audit.sh" --session-live "$sid" "$n" | awk '{print $2}')
   [ "$live" = no ] || { refuse "$t" "session_live=${live:-unknown}"; return; }
-  if has_secret "$p"; then refuse "$t" "contains an env, key or credential file"; return; fi
-  [ -z "$(find "$p" -name .git -print 2>/dev/null | head -1)" ] || { refuse "$t" "contains a git checkout"; return; }
+  if has_secret "$res"; then refuse "$t" "contains an env, key or credential file"; return; fi
+  [ -z "$(find "$res" -name .git -print 2>/dev/null | head -1)" ] || { refuse "$t" "contains a git checkout"; return; }
   command -v lsof >/dev/null 2>&1 || { refuse "$t" "cannot check open files: lsof missing"; return; }
-  n=$(lsof +D "$p" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+  n=$(lsof +D "$res" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
   [ "$n" = 0 ] || { refuse "$t" "$n open files inside"; return; }
-  act "$t" none rm -rf -- "$p"
+  act "$t" none rm -rf -- "$res"
 }
 
 # One tab-separated line per item: type, four fields ("-" when empty, since read collapses tabs), item JSON.
-ITEMS=$(python3 - "$PLAN" <<'PY'
-import json, sys
+ITEMS=$(PLAN_JSON="$PLAN_JSON" python3 - "$PLAN" <<'PY'
+import json, os, sys
 FIELDS = {'branch': ('name', 'tip'), 'worktree': ('path', 'head'), 'path': ('path', 'kind'),
           'process': ('pid', 'cmd', 'start'), 'stash': ('sha', 'message'),
           'scratchpad': ('path', 'session_id', 'mtime')}
 try:
-    plan = json.load(open(sys.argv[1]))
+    plan = json.loads(os.environ['PLAN_JSON']) if sys.argv[1] == '-' else json.load(open(sys.argv[1]))
 except (OSError, ValueError) as e:
     sys.exit('error: cannot read plan: %s' % e)
 if not isinstance(plan, list):

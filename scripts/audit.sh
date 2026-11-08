@@ -10,6 +10,7 @@
 # It never reads .env files or prints process environments (it only greps them for the session id).
 # Compatible with bash 3.2 (macOS default) and GNU or BSD userland.
 set -uo pipefail
+export GIT_OPTIONAL_LOCKS=0   # status probes must not refresh any index: the audit is read-only
 
 FETCH=1 REPO="" SINCE="" BIG_MB=50 MACHINE=0 ROOTS_ARG="$HOME/dev" LIVE_IDS_ARG="" LIVE_NM_ARG=""
 while [ $# -gt 0 ]; do
@@ -104,10 +105,14 @@ else newest() { find "$1" -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -1;
 # that variable is extracted; no environment is printed). Unreadable processes are ignored: a live Claude Code
 # session rewrites its transcript every turn, so 7 days of transcript inactivity plus no readable carrier is the
 # proof; the residual risk is losing scratch files of a session idle over a week, which are temporary by design.
-# macOS hides every process environment, so there the transcript and scratch ages decide alone.
+# On macOS, ps -E shows the environments it may (this user's processes); whatever it cannot show is ignored.
 scan_envs() {
   LIVE_IDS=""
-  [ "$OS" = Linux ] || return 0
+  if [ "$OS" = Darwin ]; then
+    LIVE_IDS=$(ps -wwEo pid=,command= -U "$mine" 2>/dev/null | grep -oE '(^| )CLAUDE_CODE_SESSION_ID=[^ ]+' |
+      sed 's/^ *CLAUDE_CODE_SESSION_ID=//' | sort -u)
+    return 0
+  fi
   LIVE_IDS=$(for e in /proc/[0-9]*/environ; do
       [ -r "$e" ] || continue
       { tr '\0' '\n' < "$e" | sed -n 's/^CLAUDE_CODE_SESSION_ID=//p'; } 2>/dev/null
