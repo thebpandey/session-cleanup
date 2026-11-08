@@ -209,6 +209,7 @@ session-cleanup/
 └── evals/                # test cases in the `claude plugin eval` format
     ├── plain-git-mixed-leftovers/
     ├── mostly-clean-repo/
+    ├── benchmark-iteration-1.md  # first eval run: with vs without the skill
     ├── smoke.sh          # builds a fixture and runs audit.sh against it (Linux, macOS)
     └── smoke.ps1         # same for audit.ps1 (Windows)
 ```
@@ -228,6 +229,8 @@ First iteration, Claude Sonnet, one run per configuration, graded on the fixture
 | mostly-clean-repo | 4/4 | 1/4 |
 
 Without the skill the model was already cautious (it kept unmerged work and did not read `.env.local`), but it cleaned nothing, not even branches git confirms are merged, and gave no verification commands. With the skill it removed only the provably safe items, recorded restore SHAs, and ended with verification commands. The skill added about 15 seconds per run at equal token cost.
+
+Full numbers (pass rate, time and tokens, with spread): [evals/benchmark-iteration-1.md](evals/benchmark-iteration-1.md).
 
 The audit scripts also have a smoke test that builds the mixed-leftovers fixture, starts a fake session process and runs the audit. Verified on Ubuntu 24.04 (bash 5), macOS 27 on Apple silicon (bash 3.2, about 4 seconds), and Windows 11 (PowerShell 5.1):
 
