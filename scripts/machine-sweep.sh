@@ -5,7 +5,7 @@
 # sessions (audit.sh --machine class "safe": session_live=no, newest mtime over 7 days), through clean.sh so every
 # guard and the ledger apply. Everything else becomes ask:/report: lines in
 # ~/.local/state/session-cleanup/last-machine-sweep.txt for the next session to show.
-# --dry-run changes nothing and writes no file; it prints the report instead.
+# --dry-run changes nothing, takes no lock and writes no file; it prints the report instead.
 set -uo pipefail
 
 DRY=0
@@ -17,10 +17,12 @@ case "${1:-}" in
 esac
 SK=$(cd "$(dirname "$0")" && pwd)
 ST="${XDG_STATE_HOME:-$HOME/.local/state}/session-cleanup"
-mkdir -p "$ST" || exit 1
-command -v flock >/dev/null 2>&1 || { echo "error: flock missing" >&2; exit 2; }
-exec 9>"$ST/machine-sweep.lock"
-flock -n 9 || { echo "machine-sweep: another run is in progress"; exit 0; }
+if [ "$DRY" = 0 ]; then # a dry run writes nothing, so it takes no lock
+  mkdir -p "$ST" || exit 1
+  command -v flock >/dev/null 2>&1 || { echo "error: flock missing" >&2; exit 2; }
+  exec 9>"$ST/machine-sweep.lock"
+  flock -n 9 || { echo "machine-sweep: another run is in progress"; exit 0; }
+fi
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/sc-sweep.XXXXXX") || exit 1
 trap 'rm -rf "$W"' EXIT

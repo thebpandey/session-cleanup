@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # audit.sh [--no-fetch] [--repo <path>] [--since <ISO-8601>] [--big-mb <N>]
 # audit.sh --machine [--roots <dir>[:<dir>]] [--big-mb <N>]   machine-wide MACHINE section only
-# audit.sh --session-live <id>...                             prints "<id> yes|no|unknown" per id
+# audit.sh --session-live <id> <newest_mtime>               prints "<id> yes|no|unknown"
 #
 # Read-only end-of-session audit for Linux and macOS (Windows: use audit.ps1).
 # Prints one section per area as "key: value" lines.
@@ -11,7 +11,7 @@
 # Compatible with bash 3.2 (macOS default) and GNU or BSD userland.
 set -uo pipefail
 
-FETCH=1 REPO="" SINCE="" BIG_MB=50 MACHINE=0 ROOTS_ARG="$HOME/dev" LIVE_IDS_ARG=""
+FETCH=1 REPO="" SINCE="" BIG_MB=50 MACHINE=0 ROOTS_ARG="$HOME/dev" LIVE_IDS_ARG="" LIVE_NM_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-fetch) FETCH=0 ;;
@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
     --big-mb) BIG_MB="$2"; shift ;;
     --machine) MACHINE=1 ;;
     --roots) ROOTS_ARG="$2"; shift ;;
-    --session-live) shift; LIVE_IDS_ARG="$*"; [ -n "$LIVE_IDS_ARG" ] || { echo "usage: --session-live <id>..." >&2; exit 2; }; break ;;
+    --session-live) [ $# -eq 3 ] || { echo "usage: --session-live <id> <newest_mtime>" >&2; exit 2; }; LIVE_IDS_ARG="$2"; LIVE_NM_ARG="$3"; break ;;
     -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -100,70 +100,37 @@ is_uuid() { printf '%s\n' "$1" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
 if [ "$OS" = Darwin ]; then newest() { find "$1" -exec stat -f %m {} + 2>/dev/null | sort -n | tail -1; }
 else newest() { find "$1" -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -1; }; fi
 
-# scan_envs sets LIVE_IDS (session ids found in this user's process environments) and CANDS (start epochs of
-# this user's processes whose environment is unreadable and whose session cannot be told from their ancestry).
-# Only CLAUDE_CODE_SESSION_ID is extracted; no environment is printed. An unreadable process takes the session
-# of its nearest readable ancestor (environments are inherited) and none when the chain crosses another user's
-# process (sudo and daemons reset the environment). A chain that reaches pid 1 or the user's systemd, where
-# orphans are reparented, is a candidate: it may hold any session started before it.
+# scan_envs sets LIVE_IDS: the CLAUDE_CODE_SESSION_ID values in this user's readable process environments (only
+# that variable is extracted; no environment is printed). Unreadable processes are ignored: a live Claude Code
+# session rewrites its transcript every turn, so 7 days of transcript inactivity plus no readable carrier is the
+# proof; the residual risk is losing scratch files of a session idle over a week, which are temporary by design.
 scan_envs() {
-  LIVE_IDS="" CANDS="" ENV_PROBE=none
+  LIVE_IDS="" ENV_PROBE=none
   [ "$OS" = Linux ] || return 0
   ENV_PROBE=proc
-  local res p s
-  res=$(ps -axo pid=,ppid=,ruid=,comm= 2>/dev/null | while read -r p pp u c; do
-      st=o id=-
-      if [ "$u" = "$mine" ]; then
-        if id=$({ tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^CLAUDE_CODE_SESSION_ID=//p'; } 2>/dev/null); then
-          st=r; id=${id%%$'\n'*}; [ -n "$id" ] || id=-
-        elif [ -d "/proc/$p" ]; then st=u id=-
-        else continue; fi
-      fi
-      printf '%s %s %s %s %s\n' "$p" "$pp" "$st" "$id" "$c"
-    done | awk '{pp[$1]=$2; st[$1]=$3; id[$1]=$4; c[$1]=$5}
-    END{
-      for (p in st) {
-        if (st[p]=="r" && id[p]!="-") print "live", id[p]
-        if (st[p]!="u") continue
-        q=pp[p]; res="cand"
-        for (n=0; n<64; n++) {
-          if (q==1 || !(q in st)) break
-          if (st[q]!="o" && c[q]=="systemd" && pp[q]==1) break
-          if (st[q]=="o") { res="none"; break }
-          if (st[q]=="r") { res=(id[q]=="-") ? "none" : "live " id[q]; break }
-          q=pp[q]
-        }
-        if (res=="cand") print "cand", p; else if (res!="none") print res
-      }
-    }')
-  LIVE_IDS=$(printf '%s\n' "$res" | awk '$1=="live"{print $2}' | sort -u)
-  for p in $(printf '%s\n' "$res" | awk '$1=="cand"{print $2}'); do
-    s=$(pstart "$p") && CANDS="$CANDS $s"
-  done
+  LIVE_IDS=$(for e in /proc/[0-9]*/environ; do
+      [ -r "$e" ] || continue
+      { tr '\0' '\n' < "$e" | sed -n 's/^CLAUDE_CODE_SESSION_ID=//p'; } 2>/dev/null
+    done | sort -u)
   return 0
 }
 tx_of() { local f; for f in "$HOME"/.claude/projects/*/"$1".jsonl; do [ -f "$f" ] && { echo "$f"; return 0; }; done; return 1; }
-# session_live <id>: yes when a process carries the id or its transcript changed in the last 24h; unknown when an
-# unreadable environment could hold it (or on macOS, which hides environments); otherwise no.
+# session_live <id> <scratch newest mtime>: yes when a readable process carries the id or the transcript changed in
+# the last 24h; no only when the transcript exists and is 7+ days idle, no readable process carries the id and the
+# scratch folder is 7+ days idle; otherwise unknown (also on macOS, which hides every environment).
 session_live() {
-  local id="$1" tx t1 s
+  local id="$1" nm="${2:-}" tx t
+  t=$(date +%s)
   printf '%s\n' "$LIVE_IDS" | grep -qxF -- "$id" && { echo yes; return; }
   tx=$(tx_of "$id")
-  [ -n "$tx" ] && [ $(( $(date +%s) - $(mtime "$tx") )) -lt 86400 ] && { echo yes; return; }
-  [ "$ENV_PROBE" = proc ] || { echo unknown; return; }
-  [ -z "$CANDS" ] && { echo no; return; }
-  [ -n "$tx" ] || { echo unknown; return; }
-  # A candidate started before the session began cannot carry its id. The first transcript entry can come well
-  # after launch (idle at the prompt), so allow a day of slack.
-  t1=$(iso2epoch "$(grep -o '"timestamp":"[^"]*"' "$tx" | head -1 | cut -d'"' -f4)")
-  [ "${t1:-0}" -gt 0 ] || { echo unknown; return; }
-  for s in $CANDS; do [ "$s" -ge $(( t1 - 86400 )) ] && { echo unknown; return; }; done
-  echo no
+  [ -n "$tx" ] && [ $(( t - $(mtime "$tx") )) -lt 86400 ] && { echo yes; return; }
+  if [ "$ENV_PROBE" = proc ] && [ -n "$tx" ] && [ $(( t - $(mtime "$tx") )) -ge 604800 ] &&
+     [ -n "$nm" ] && [ $(( t - nm )) -ge 604800 ]; then echo no; else echo unknown; fi
 }
 
 if [ -n "$LIVE_IDS_ARG" ]; then
   scan_envs
-  for i in $LIVE_IDS_ARG; do echo "$i $(session_live "$i")"; done
+  echo "$LIVE_IDS_ARG $(session_live "$LIVE_IDS_ARG" "$LIVE_NM_ARG")"
   exit 0
 fi
 
@@ -171,7 +138,7 @@ if [ "$MACHINE" = 1 ]; then
   hdr MACHINE
   echo "roots: $ROOTS_ARG"
   scan_envs
-  if [ "$ENV_PROBE" = proc ]; then echo "liveness: process environments and transcripts ($(echo $CANDS | wc -w | tr -d ' ') unreadable orphan environments)"
+  if [ "$ENV_PROBE" = proc ]; then echo "liveness: readable process environments and transcript age (no = transcript and scratch folder idle 7+ days)"
   else echo "liveness: transcripts only (this OS hides process environments, so not live means unknown)"; fi
   IT=$(mktemp "${TMPDIR:-/tmp}/.sc-machine.XXXXXX") || exit 1
   trap 'rm -f "$IT"' EXIT
@@ -185,9 +152,9 @@ if [ "$MACHINE" = 1 ]; then
         [ -e "$e" ] || [ -L "$e" ] || continue
         n=$(basename "$e")
         if is_uuid "$n" && [ -d "$e" ] && [ ! -L "$e" ]; then
-          nm=$(newest "$e"); live=$(session_live "$n"); class=ask
+          nm=$(newest "$e"); live=$(session_live "$n" "$nm"); class=ask
           [ "$live" = yes ] && class=in_use
-          [ "$live" = no ] && [ $(( now - ${nm:-$now} )) -gt 604800 ] && class=safe
+          [ "$live" = no ] && class=safe
           printf '%s\t%s\t%s\n' "$(kb "$e")" "$class" "scratchpad: $e session_id=$n newest_mtime=$nm age=$(age "$nm") session_live=$live"
         else
           printf '%s\t%s\t%s\n' "$(kb "$e")" ask "claude_tmp_other: $e age=$(age "$(mtime "$e")")"

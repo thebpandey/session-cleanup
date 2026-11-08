@@ -229,11 +229,11 @@ EOF
   for x in "$base" "$proj" "$p"; do [ -L "$x" ] && { refuse "$t" "symlink in path ($x)"; return; }; done
   [ -d "$p" ] || { skip "$t" "folder is gone"; return; }
   for x in "$base" "$proj" "$p"; do [ "$(fuid "$x")" = "$mine" ] || { refuse "$t" "not owned by you ($x)"; return; }; done
-  live=$(bash "$(dirname "$0")/audit.sh" --session-live "$sid" | awk '{print $2}')
-  [ "$live" = no ] || { refuse "$t" "session_live=${live:-unknown}"; return; }
   n=$(newest "$p")
   [ "$n" = "$mt" ] || { skip "$t" "newest mtime $mt is now $n"; return; }
-  [ $(( $(date +%s) - n )) -gt 604800 ] || { refuse "$t" "changed within 7 days"; return; }
+  # The audit's rule, re-run now: covers the transcript, readable carriers and the 7-day scratch age.
+  live=$(bash "$(dirname "$0")/audit.sh" --session-live "$sid" "$n" | awk '{print $2}')
+  [ "$live" = no ] || { refuse "$t" "session_live=${live:-unknown}"; return; }
   if has_secret "$p"; then refuse "$t" "contains an env, key or credential file"; return; fi
   [ -z "$(find "$p" -name .git -print 2>/dev/null | head -1)" ] || { refuse "$t" "contains a git checkout"; return; }
   command -v lsof >/dev/null 2>&1 || { refuse "$t" "cannot check open files: lsof missing"; return; }
