@@ -39,17 +39,17 @@ Then fill the gaps the script cannot see, in parallel where possible:
 
 ## Phase 2: Classify each finding
 
-**AUTO-CLEAN** (safe and recoverable; do it, then report it):
-- Local branches fully merged into main (`git branch -d`, never `-D`), excluding main, the current branch, and any branch checked out in a worktree.
+**AUTO-CLEAN** (safe and recoverable; do it through `clean.sh`, then report it). Recoverable means on the remote (`on_origin=yes` in the audit), not just merged into local main:
+- Local branches fully merged into main and `on_origin=yes` (`git branch -d`, never `-D`), excluding main, the current branch, and any branch checked out in a worktree.
 - Prunable worktree records whose folder is already gone (`git worktree prune`).
-- Clean linked worktrees inside this repo whose branch is merged into main and has no commits ahead of it (`git worktree remove <path>`, no `--force`; then `git branch -d`). If the lanes harness owns it, use the harness script instead (see below).
+- Clean linked worktrees inside this repo (`dirty_files=0`, `user_ignored_files=0`, `on_origin=yes`) whose branch has no commits ahead of main (`git worktree remove <path>`, no `--force`; then `git branch -d`). If the lanes harness owns it, use the harness script instead (see below).
 - Temp folders whose lane or branch no longer exists and that no process has open (`open_handles=0`; recheck with `lsof +D <dir>` immediately before deleting).
 - Processes with `owner=this_session` that you can trace to this conversation and that are idle or no longer needed (dev servers, watchers, headless browsers). Kill by PID only (`kill <pid>` on Linux/macOS, `Stop-Process -Id <pid>` on Windows).
 - Stale build type caches (`.next/types`, `.next/dev/types`) that are gitignored. These regenerate on the next build.
 - This session's own scratch files in its scratchpad folder, and untracked junk in the repo (`*.orig`, `*.rej`, stray logs) that is `this_session` **and** traceable to a command you ran.
 
 **ASK** (could lose work, or not provably this session's):
-- Unmerged branches, or any commits not in main. A branch marked `PATCHES_ALREADY_IN_main` was likely squash- or rebase-merged: say so, but still ask before `-D`.
+- Unmerged branches, any commits not in main, and merged work that is `on_origin=no` (merged locally only). A branch marked `PATCHES_ALREADY_IN_main` was likely squash- or rebase-merged: say so, but still ask before `-D`.
 - Dirty worktrees (`dirty_files > 0`), stashes, `coverage/` and `test-results/` that may be wanted as evidence.
 - Processes `other_session_or_user` or `started_during_session`, and any process you cannot trace.
 - Anything `pre_session`, and any untracked file you did not create.
@@ -60,15 +60,37 @@ Then fill the gaps the script cannot see, in parallel where possible:
 - Open tracker items (beads `in_progress`, tasks.md WIP) with no active work, and finished work whose task is still open. Name the item and what you saw.
 - Worktrees or folders outside this repo, and `upstream_gone` branches that still have unique commits.
 
+## Executing the cleanup
+
+AUTO-CLEAN items and owner-approved ASK items run through the bundled executor, never through hand-typed `git branch`, `git worktree remove`, `git stash drop`, `rm` or `kill` commands (`git worktree prune` and the lanes harness script are the only exceptions). Write a plan to the scratchpad and run it from the repo:
+
+```bash
+bash <skill-dir>/scripts/clean.sh <scratchpad>/cleanup-plan.json --dry-run   # check, then run without --dry-run
+```
+
+The plan is a JSON array; copy each fingerprint from the audit output, never from memory:
+
+```json
+[{"type": "branch", "name": "feat/x", "tip": "<tip=>"},
+ {"type": "branch", "name": "feat/y", "tip": "<tip=>", "force": true},
+ {"type": "worktree", "path": "<linked: path>", "head": "<head=>"},
+ {"type": "path", "path": "/abs/path", "kind": "file", "mtime": <mtime=>},
+ {"type": "process", "pid": <pid=>, "cmd": "<cmd=>", "start": <start=>},
+ {"type": "stash", "sha": "<sha=>", "message": "<text after ::>"}]
+```
+
+`force` (`-D`) goes only on a branch the owner approved. The executor re-checks every target and skips anything that changed since the audit; quote its `skipped:` and `restore:` lines verbatim in the report. Completed actions are logged with their restore command in `~/.local/state/session-cleanup/ledger.jsonl`. Windows has no executor yet: there, show each command and its restore line before running it.
+
 ## Safety rules
 
 These protect work that cannot be recreated. Each one exists because the obvious shortcut has destroyed work before.
 
+- **Delete only through `clean.sh`** with fingerprints from this session's audit. If it skips an item, re-audit; never work around a skip by hand.
 - **Inspect before deleting.** For each folder, list its contents and size first. For each branch, show `git log --oneline main..<branch>` first. Put that evidence in the report.
 - **Never delete unmerged commits, dirty worktrees or stashes without the owner's explicit approval** in this conversation. Approval for one item does not cover the next.
-- **Kill processes only by PID**, after confirming `owner=this_session` and that you started it. Never `pkill`, `killall`, `kill -9` on a first attempt, or kill by port alone.
+- **Kill processes only by PID** (via the plan), after confirming `owner=this_session` and that you started it. Never `pkill`, `killall`, `kill -9` on a first attempt, or kill by port alone.
 - **Never** use bare `git stash`, `git reset --hard`, `git clean -fdx` (or any `git clean -f`), or `rm -rf` with a glob. These have no undo. Delete named paths one at a time.
-- `git branch -D`, `git stash drop` and `git worktree remove --force` run only on the single item the owner approved, after showing what will be lost (commits, diff stat). Record the branch tip SHA in the report so it can be restored.
+- `git branch -D` and `git stash drop` run only on the single item the owner approved, after showing what will be lost (commits, diff stat). `git worktree remove --force` is never used; a dirty worktree stays until the owner saves or discards its changes.
 - **Never read, print, move or delete `.env` files, keys or credentials**, even when they look like junk. Report them by path only.
 - **Stay inside this repo.** Other apps' worktrees, detached checkouts or shared `/tmp` folders are reported, not touched. Never glob-delete in `/tmp`.
 - **Never kill `harness_do_not_kill` processes** or the Claude process itself.
@@ -118,7 +140,7 @@ Rules for the report:
 - Never say an area is clean unless the audit or a command in this session showed it. If a check was skipped (offline, CLI missing, no permission), say so under Report only.
 - Next Actions always includes at least one verification command with its expected output.
 
-After the owner answers ASK items, carry out exactly what they approved, rerun the relevant audit section, and report the result.
+After the owner answers ASK items, carry out exactly what they approved with a new plan for `clean.sh`, rerun the relevant audit section, and report the result.
 
 ## Logging
 

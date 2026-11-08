@@ -41,13 +41,27 @@ if [ "$OS" = Darwin ]; then
   iso2epoch() { local t="${1%%.*}"; t="${t%Z}"; date -j -u -f '%Y-%m-%dT%H:%M:%S' "$t" +%s 2>/dev/null || echo 0; }
   epoch2touch() { date -r "$1" +%Y%m%d%H%M.%S; }
   sha8() { printf '%s' "$1" | shasum -a 256 | cut -c1-8; }
+  lstart2epoch() { date -j -f '%a %b %d %T %Y' "$1" +%s 2>/dev/null; }
 else
   mtime() { stat -c %Y "$1" 2>/dev/null || echo 0; }
   fuid() { stat -c %u "$1" 2>/dev/null; }
   iso2epoch() { date -d "$1" +%s 2>/dev/null || echo 0; }
   epoch2touch() { date -d "@$1" +%Y%m%d%H%M.%S; }
   sha8() { printf '%s' "$1" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-8; }
+  lstart2epoch() { date -d "$1" +%s 2>/dev/null; }
 fi
+# Process start as epoch seconds; clean.sh compares it to detect a reused PID.
+pstart() { local s; s=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null) && [ -n "$s" ] && lstart2epoch "$s"; }
+# yes when <ref>'s work is on the remote's main: an ancestor of it, or every patch present (git cherry).
+on_remote() {
+  local r="${REMOTE:-}/$MAIN" c
+  { [ -n "${REMOTE:-}" ] && [ -n "$MAIN" ] && git show-ref --verify --quiet "refs/remotes/$r"; } || { echo no; return; }
+  git merge-base --is-ancestor "$1" "$r" 2>/dev/null && { echo yes; return; }
+  c=$(git cherry "$r" "$1" 2>/dev/null) || { echo no; return; }
+  case "$c" in *"+ "*) echo no ;; *) echo yes ;; esac
+}
+# Ignored output that regenerates on the next build; same set as lanes worktree-tools.py cleanup().
+REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo|coverage)(/|$)|\.(pyc|tsbuildinfo)$'
 # ps etime ([[dd-]hh:]mm:ss) -> seconds; works with GNU and BSD ps
 etime2s() {
   local e="$1" d=0 h=0 m=0 s=0
@@ -113,7 +127,7 @@ if [ -z "$st" ]; then echo "status: clean"; else
   printf '%s\n' "$st" | sed 's/^/  /' | head -60
   junk=$(printf '%s\n' "$st" | awk '$1=="??"{print $2}' | grep -E '(\.orig|\.rej|\.log|\.bak|\.tmp|\.swp|~|\.png|\.jpe?g|\.webp|\.gif|\.mp4|\.webm|\.har|\.trace|\.zip|nohup\.out|\.DS_Store)$|(^|/)(scratch|tmp|temp)[^/]*$')
   if [ -n "$junk" ]; then echo "junk_candidates:"; printf '%s\n' "$junk" | while read -r f; do
-    m=$(mtime "$f"); echo "  $f size=$(sz "$f") age=$(age "$m") $(recent "$m" && echo this_session || echo pre_session)"; done; fi
+    m=$(mtime "$f"); echo "  $f size=$(sz "$f") mtime=$m age=$(age "$m") $(recent "$m" && echo this_session || echo pre_session)"; done; fi
   envs=$(printf '%s\n' "$st" | awk '{print $NF}' | grep -E '(^|/)\.env' | grep -v '\.example$')
   [ -n "$envs" ] && echo "WARNING: .env-like paths in status (do not read, print or delete): $(printf '%s ' $envs)"
 fi
@@ -154,7 +168,9 @@ while IFS=$'\t' read -r p b pr; do
   dirty=$(git -C "$p" status --porcelain 2>/dev/null | cnt)
   ahead="?"; [ -n "$MAIN" ] && [ "$b" != "(detached)" ] && ahead=$(git rev-list --count "$MAIN..$b" 2>/dev/null)
   last=$(git -C "$p" log -1 --format=%ct 2>/dev/null || echo 0)
-  echo "linked: $p [$b] inside_repo=$inside dirty_files=$dirty commits_not_in_$MAIN=$ahead last_commit_age=$(age "$last")"
+  h=$(git -C "$p" rev-parse HEAD 2>/dev/null)
+  ui=$(git -C "$p" status --porcelain --ignored=matching --untracked-files=all 2>/dev/null | sed -n 's/^!! //p' | sed 's#/$##' | grep -Ecv "$REGEN")
+  echo "linked: $p [$b] inside_repo=$inside dirty_files=$dirty commits_not_in_$MAIN=$ahead last_commit_age=$(age "$last") head=$h on_${REMOTE:-remote}=$(on_remote "$h") user_ignored_files=$ui"
   [ "$inside" = no ] && echo "  NOTE: outside this repo, report only"
 done
 pd=$(git worktree prune --dry-run -v 2>&1)
@@ -168,14 +184,14 @@ if [ -n "$MAIN" ]; then
   git branch --merged "$MAIN" --format='%(refname:short)' | while read -r br; do
     [ "$br" = "$MAIN" ] && continue
     co=""; printf '%s\n' "$wt_branches" | grep -qx "$br" && co=" CHECKED_OUT_IN_WORKTREE"
-    echo "  $br last=$(age "$(git log -1 --format=%ct "$br")")$co"
+    echo "  $br last=$(age "$(git log -1 --format=%ct "$br")")$co tip=$(git rev-parse "$br") on_${REMOTE:-remote}=$(on_remote "$br")"
   done
   echo "not_merged_into_$MAIN:"
   git branch --no-merged "$MAIN" --format='%(refname:short)' | while read -r br; do
     n=$(git rev-list --count "$MAIN..$br"); ct=$(git log -1 --format=%ct "$br")
     # A squash/rebase merge leaves no ancestry; check whether the branch's patches are already in main.
     eq=""; [ -z "$(git cherry "$MAIN" "$br" 2>/dev/null | grep '^+')" ] && eq=" PATCHES_ALREADY_IN_$MAIN"
-    echo "  $br commits=$n last=$(age "$ct") $(recent "$ct" && echo this_session || echo pre_session)$eq"
+    echo "  $br commits=$n last=$(age "$ct") $(recent "$ct" && echo this_session || echo pre_session)$eq tip=$(git rev-parse "$br") on_${REMOTE:-remote}=$(on_remote "$br")"
   done
   echo "upstream_gone:"
   git for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads | awk '$2=="[gone]"{print "  "$1}'
@@ -187,12 +203,12 @@ fi
 
 # ---------- stashes ----------
 hdr STASHES
-sl=$(git stash list --format='%gd%x09%ct%x09%s' 2>/dev/null)
+sl=$(git stash list --format='%gd%x09%ct%x09%H%x09%s' 2>/dev/null)
 if [ -z "$sl" ]; then echo "stashes: none"; else
-  printf '%s\n' "$sl" | while IFS=$'\t' read -r ref ct msg; do
+  printf '%s\n' "$sl" | while IFS=$'\t' read -r ref ct sha msg; do
     flag=""; [ $(( now - ct )) -gt 604800 ] && flag=" OLDER_THAN_7D"
     recent "$ct" && flag="$flag THIS_SESSION"
-    echo "  $ref age=$(age "$ct")$flag :: $msg"
+    echo "  $ref age=$(age "$ct")$flag sha=$sha :: $msg"
   done
 fi
 fi # IN_GIT
@@ -283,7 +299,7 @@ while read -r pid ppid uid et cpu cmd; do
   # Claude Code's own MCP servers, plugins and hooks inherit the session env; they are harness, not leftovers.
   case "$cmd" in *"/.claude/"*|*mcp*|*MCP*) [ "$owner" = this_session ] && owner=harness_do_not_kill ;; esac
   PIDS="$PIDS $pid"
-  echo "  pid=$pid owner=$owner in_repo=$inrepo elapsed=$(age $(( ps_now - $(etime2s "$et") ))) cpu=${cpu}% cmd=$(printf '%s' "$cmd" | cut -c1-140)"
+  echo "  pid=$pid owner=$owner in_repo=$inrepo elapsed=$(age $(( ps_now - $(etime2s "$et") ))) cpu=${cpu}% start=$(pstart "$pid") cmd=$(printf '%s' "$cmd" | cut -c1-140)"
 done <<EOF
 $plist
 EOF
@@ -305,7 +321,7 @@ if [ "$IN_GIT" = 1 ]; then
     while IFS= read -r d; do
       [ -n "$d" ] || continue
       ign=no; git -C "$MAIN_WT" check-ignore -q "$d" 2>/dev/null && ign=yes
-      echo "  build_artifact: $d size=$(sz "$d") age=$(age "$(mtime "$d")") gitignored=$ign"
+      echo "  build_artifact: $d size=$(sz "$d") mtime=$(mtime "$d") age=$(age "$(mtime "$d")") gitignored=$ign"
     done
   done
   echo "large_files (>${BIG_MB}MB, not tracked, excluding node_modules/.git/.next):"
@@ -317,7 +333,7 @@ if [ "$SINCE_EPOCH" -gt 0 ]; then
   ref=$(mktemp "${TMPDIR:-/tmp}/.sc-ref.XXXXXX") && touch -t "$(epoch2touch "$SINCE_EPOCH")" "$ref"
   for r in $TMPROOTS; do
     find "$r" -maxdepth 1 -mindepth 1 -type d -user "$mine" -newer "$ref" ! -name "claude-$mine" ! -name claude ! -name "lanes-$mine" 2>/dev/null | head -30 |
-      while IFS= read -r d; do echo "  $d size=$(sz "$d") open_handles=$(lsof +D "$d" 2>/dev/null | tail -n +2 | cnt)"; done
+      while IFS= read -r d; do echo "  $d size=$(sz "$d") mtime=$(mtime "$d") open_handles=$(lsof +D "$d" 2>/dev/null | tail -n +2 | cnt)"; done
   done
   rm -f "$ref"
 fi
