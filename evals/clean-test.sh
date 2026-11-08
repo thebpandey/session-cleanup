@@ -18,6 +18,13 @@ git branch merged; git branch moved
 MERGED_TIP=$(git rev-parse merged); MOVED_TIP=$(git rev-parse moved)
 git checkout -q -b unmerged; echo u > u; git add u; git commit -qm unmerged; git checkout -q main
 UNMERGED_TIP=$(git rev-parse unmerged)
+# origin/main gets the side commit; mergeonly's only unpublished commit is a merge, which git cherry ignores.
+git init -q --bare "$D/origin.git"; git remote add origin "$D/origin.git"
+git checkout -q -b side; echo s > s; git add s; git commit -qm side; git push -q origin side:main
+git checkout -q -b mergeonly main; git merge -q --no-ff side -m "merge with its own resolution"; git checkout -q main
+# A clean worktree that a process is using as its cwd.
+git worktree add -q "$D/repo/.claude/worktrees/busy" -b wt/busy; BUSY_HEAD=$(git -C .claude/worktrees/busy rev-parse HEAD)
+(cd .claude/worktrees/busy && exec sleep 60) & BUSY_PID=$!
 # Next.js standalone output copies .env into ignored build output: removing the worktree would delete it.
 git worktree add -q "$D/repo/.claude/worktrees/next" -b wt/next; NEXT_HEAD=$(git -C .claude/worktrees/next rev-parse HEAD)
 mkdir -p .claude/worktrees/next/.next/standalone; echo FAKE=1 > .claude/worktrees/next/.next/standalone/.env
@@ -28,6 +35,7 @@ echo unsaved > .claude/worktrees/w/notes.md
 echo junk > junk.log; ln -s "$D/repo/a" link; echo FAKE=1 > .env
 JUNK_SIZE=$(wc -c < junk.log | tr -d ' ')
 echo before > changed.log; CHANGED_SIZE=$(wc -c < changed.log | tr -d ' ')
+echo old > touched.log; touch -t 202001010000 touched.log; TOUCHED_MTIME=$(cd "$D/repo" && python3 -c 'import os; print(int(os.stat("touched.log").st_mtime))')
 cat > "$D/plan.json" <<EOF
 [
   {"type": "branch", "name": "merged", "tip": "$MERGED_TIP"},
@@ -36,6 +44,8 @@ cat > "$D/plan.json" <<EOF
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/next", "head": "$NEXT_HEAD"},
   {"type": "worktree", "path": "$SPACED", "head": "$W2_HEAD"},
   {"type": "path", "path": "$D/repo/changed.log", "kind": "file", "size_bytes": $CHANGED_SIZE},
+  {"type": "path", "path": "$D/repo/touched.log", "kind": "file", "mtime": $TOUCHED_MTIME},
+  {"type": "worktree", "path": "$D/repo/.claude/worktrees/busy", "head": "$BUSY_HEAD"},
   {"type": "worktree", "path": "$D/repo/.claude/worktrees/w", "head": "$WT_HEAD"},
   {"type": "path", "path": "$D/repo/junk.log", "kind": "file", "size_bytes": $JUNK_SIZE},
   {"type": "path", "path": "$D/repo/link", "kind": "file", "size_bytes": 2},
@@ -45,6 +55,7 @@ EOF
 # The branch moves after the plan was written: its recorded tip no longer matches.
 git checkout -q moved; echo c > c; git add c; git commit -qm "new work"; git checkout -q main
 echo "edited after the plan" >> changed.log
+touch -t 202101010000 touched.log   # same size, new mtime
 
 OUT=$(bash "$SK/scripts/clean.sh" "$D/plan.json" --dry-run 2>&1); rc=$?
 [ "$rc" = 0 ] && git show-ref -q refs/heads/merged && [ -f junk.log ] && [ ! -e "$LEDGER" ] && has "would: branch merged"
@@ -63,6 +74,14 @@ expect "dirty worktree is refused" $?
 expect "symlinked path is refused" $?
 [ -f .env ] && has "skipped: path $D/repo/.env: refused (env, key or credential file)"
 expect ".env path is refused" $?
+[ -f touched.log ] && has "skipped: path $D/repo/touched.log: changed since audit (mtime $TOUCHED_MTIME is now"
+expect "file whose mtime changed after the plan survives" $?
+[ -d .claude/worktrees/busy ] && has "worktrees/busy: refused (a process has its cwd inside)"
+expect "worktree used as a process cwd is refused" $?
+kill "$BUSY_PID" 2>/dev/null
+AUDIT=$(bash "$SK/scripts/audit.sh" --no-fetch 2>&1)
+printf '%s\n' "$AUDIT" | grep -qE '^  mergeonly .* on_origin=no' && printf '%s\n' "$AUDIT" | grep -qE '^  side .* on_origin=yes'
+expect "audit: branch whose only unpublished commit is a merge is on_origin=no; published branch is yes" $?
 [ -f changed.log ] && has "skipped: path $D/repo/changed.log: changed since audit (size $CHANGED_SIZE is now"
 expect "file changed after the plan survives" $?
 [ -f .claude/worktrees/next/.next/standalone/.env ] && has "worktrees/next: refused (contains an env, key or credential file)"

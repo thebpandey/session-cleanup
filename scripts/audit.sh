@@ -52,13 +52,15 @@ else
 fi
 # Process start as epoch seconds; clean.sh compares it to detect a reused PID.
 pstart() { local s; s=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null) && [ -n "$s" ] && lstart2epoch "$s"; }
-# yes when <ref>'s work is on the remote's main: an ancestor of it, or every patch present (git cherry).
+# yes when <ref>'s work is on the remote's main: an ancestor of it, or every patch present (git cherry)
+# and no merge commits (cherry skips merges, which can carry unique conflict resolutions).
 on_remote() {
   local r="${REMOTE:-}/$MAIN" c
   { [ -n "${REMOTE:-}" ] && [ -n "$MAIN" ] && git show-ref --verify --quiet "refs/remotes/$r"; } || { echo no; return; }
   git merge-base --is-ancestor "$1" "$r" 2>/dev/null && { echo yes; return; }
   c=$(git cherry "$r" "$1" 2>/dev/null) || { echo no; return; }
-  case "$c" in *"+ "*) echo no ;; *) echo yes ;; esac
+  case "$c" in *"+ "*) echo no; return ;; esac
+  [ -z "$(git rev-list --merges "$r..$1" 2>/dev/null)" ] && echo yes || echo no
 }
 # Ignored output that regenerates on the next build; same set as lanes worktree-tools.py cleanup().
 REGEN='(^|/)(__pycache__|\.ruff_cache|\.pytest_cache|\.mypy_cache|node_modules|dist|build|\.next|\.turbo|coverage)(/|$)|\.(pyc|tsbuildinfo)$'

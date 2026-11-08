@@ -27,14 +27,15 @@ if [ "$OS" = Darwin ]; then
   fsize() { stat -f %z "$1" 2>/dev/null; }
   dsize() { find "$1" -type f -exec stat -f %z {} + 2>/dev/null | awk '{s+=$1} END{print s+0}'; }
   lstart2epoch() { date -j -f '%a %b %d %T %Y' "$1" +%s 2>/dev/null; }
-  cwds() { lsof -a -u "$mine" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; }
+  cwds() { lsof -a -u "$mine" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; return 0; }
 else
   mtime() { stat -c %Y "$1" 2>/dev/null; }
   fuid() { stat -c %u "$1" 2>/dev/null; }
   fsize() { stat -c %s "$1" 2>/dev/null; }
   dsize() { find "$1" -type f -exec stat -c %s {} + 2>/dev/null | awk '{s+=$1} END{print s+0}'; }
   lstart2epoch() { date -d "$1" +%s 2>/dev/null; }
-  cwds() { for c in /proc/[0-9]*/cwd; do readlink "$c" 2>/dev/null; done; }
+  # Unreadable or vanished /proc entries are normal; return 0 so pipefail keeps the matches found.
+  cwds() { for c in /proc/[0-9]*/cwd; do readlink "$c" 2>/dev/null; done; return 0; }
 fi
 pstart() { local s; s=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null) && [ -n "$s" ] && lstart2epoch "$s"; }
 q() { printf '%q' "$1"; }  # shell-quote one restore-command argument
@@ -127,6 +128,7 @@ do_worktree() {
   n=$(git -C "$res" status --porcelain --ignored=matching --untracked-files=all | sed -n 's/^!! //p' | sed 's#/$##' | grep -Ecv "$REGEN")
   [ "$n" = 0 ] || { refuse "$t" "$n ignored files that do not regenerate"; return; }
   if has_secret "$res"; then refuse "$t" "contains an env, key or credential file"; return; fi
+  if [ "$OS" = Darwin ] && ! command -v lsof >/dev/null 2>&1; then refuse "$t" "cannot check process cwds: lsof missing"; return; fi
   if cwds | under "$res"; then refuse "$t" "a process has its cwd inside"; return; fi
   act "$t" "git worktree add $(q "$res") $(q "${br:-$head}")" git worktree remove "$res"
 }
