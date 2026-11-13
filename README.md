@@ -290,3 +290,7 @@ These are real, billed model runs.
 ## License
 
 [MIT](LICENSE) © 2026 Bhaskar Pandey, Almora Technology
+
+---
+
+Built by [Bhaskar Pandey](https://www.bhaskarpandey.com).
